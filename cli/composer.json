@@ -1,0 +1,21 @@
+{
+    "name": "mailbxzip/cli",
+    "description": "Mailbxzip Cli source",
+    "type": "project",
+    "license": "GPL V3",
+    "autoload": {
+        "psr-4": {
+            "Mailbxzip\\Cli\\": "src/"
+        }
+    },
+    "authors": [
+        {
+            "name": "Yann",
+            "email": "yann@mailbxzip.com"
+        }
+    ],
+    "require": {
+        "dompdf/dompdf": "^3.1",
+        "zbateson/mail-mime-parser": "^3.0"
+    }
+}
