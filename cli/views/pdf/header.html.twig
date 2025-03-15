@@ -1,0 +1,24 @@
+{% block header %}
+    <div class="email-header">
+        {% if to is defined and to is not empty %}
+            <div class="header-field">
+                <span class="field-label">To:</span>
+                <span class="field-value">{{ to }}</span>
+            </div>
+        {% endif %}
+
+        {% if cc is defined and cc is not empty %}
+            <div class="header-field">
+                <span class="field-label">CC:</span>
+                <span class="field-value">{{ cc }}</span>
+            </div>
+        {% endif %}
+
+        {% if bcc is defined and bcc is not empty %}
+            <div class="header-field">
+                <span class="field-label">BCC:</span>
+                <span class="field-value">{{ bcc }}</span>
+            </div>
+        {% endif %}
+    </div>
+{% endblock %}

@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Visualisation de l'e-mail</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        .email-container {
+            border: 1px solid #ccc;
+            padding: 20px;
+            border-radius: 5px;
+        }
+        .email-header {
+            background-color: #f4f4f4;
+            padding: 10px;
+            border-bottom: 1px solid #ccc;
+        }
+        .email-body {
+            padding: 20px;
+        }
+        .attachments {
+            margin-top: 20px;
+        }
+        .attachment {
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="email-container">
+        <div class="email-header">
+            <p><strong>De:</strong> {{ from }}</p>
+            <p><strong>À:</strong> {{ to }}</p>
+            <p><strong>Objet:</strong> {{ subject }}</p>
+            <p><strong>Date:</strong> {{ date }}</p>
+        </div>
+        <div class="email-body">
+            {{ body_html|raw }}
+        </div>
+        <div class="attachments">
+            <h3>Pièces jointes:</h3>
+            {% for attachment in attachments %}
+                <div class="attachment">
+                    <p><strong>Nom:</strong> {{ attachment.filename }}</p>
+                    <p><strong>Taille:</strong> {{ attachment.size }} octets</p>
+                </div>
+            {% endfor %}
+        </div>
+    </div>
+</body>
+</html>

@@ -1,6 +1,6 @@
 <?php
 
-namespace Ycdev\Mailbxzip\In;
+namespace Mailbxzip\Cli\In;
 
 use Exception;
 use RuntimeException;
@@ -13,89 +13,45 @@ class Test {
         $this->config = $config;
     }
 
-    public function getStructure() {
-        // Retourner la structure des emails avec les dossiers et sous-dossiers
-        $structure = [
-            'folders' => []
-        ];
+    public function getFolders() {
+        
 
         // Exemple de structure de dossiers (à implémenter selon la source des emails)
         $folders = [
             'Inbox' => [
-                'subfolder1' => [
-                    'emails' => [
-                        ['subject' => 'Email 1'],
-                        ['subject' => 'Email 2']
-                    ]
-                ],
-                'subfolder2' => [
-                    'emails' => [
-                        ['subject' => 'Email 3']
-                    ]
-                ]
+                'subfolder1' => 120,
+                'subfolder2' => 230
             ],
-            'Sent' => [
-                'emails' => [
-                    ['subject' => 'Email 4']
-                ]
-            ]
+            'Sent' => 70
         ];
 
-        // Parcourir les dossiers et compter les emails
-        foreach ($folders as $folderName => $folderContent) {
-            $structure['folders'][$folderName] = $this->countEmailsInFolder($folderContent);
-        }
+        // Retourner la structure des emails avec les dossiers et sous-dossiers
+        $structure = [
+            'folders' => $folders,
+            'total' => 420
+        ];
 
         return $structure;
     }
 
-    private function countEmailsInFolder($folderContent) {
-        $emailCount = 0;
-
-        if (isset($folderContent['emails'])) {
-            $emailCount += count($folderContent['emails']);
-        }
-
-        foreach ($folderContent as $key => $value) {
-            if ($key !== 'emails' && is_array($value)) {
-                $emailCount += $this->countEmailsInFolder($value);
-            }
-        }
-
-        return $emailCount;
+    public function getEmails() {
+        return [0, 1, 2, 3, 4];
     }
 
-    public function processEmails() {
-        // Récupérer et traiter les emails
-        // Exemple de récupération d'emails (à implémenter selon la source des emails)
-        $emails = [
-            [
-                'subject' => 'Test Email',
-                'body' => 'This is a test email.',
-                'from' => 'sender@example.com',
-                'to' => 'recipient@example.com',
-                'date' => '2023-10-01'
-            ],
-            [
-                'subject' => 'Another Email',
-                'body' => 'This is another test email.',
-                'from' => 'sender2@example.com',
-                'to' => 'recipient2@example.com',
-                'date' => '2023-10-02'
-            ]
-        ];
+    public function getEmail($id) {
+        return ['Inbox', 'From: yann@mailbxzip.com
+To: test@example.com
+Subject: test
+Date: Sun, 8 Jan 2024 22:41:44 +0100
 
-        // Traiter les emails
-        $processedEmails = [];
-        foreach ($emails as $email) {
-            $processedEmails[] = $this->processEmail($email);
-        }
-
-        return $processedEmails;
+Hello world!'];
     }
 
-    private function processEmail($email) {
-        // Traiter un email individuel (à implémenter selon les besoins)
-        return $email;
+    public function preFunc() {
+        echo 'start';
+    }
+
+    public function postFunc() {
+        echo 'end';
     }
 }
