@@ -13,6 +13,7 @@ class Mailbox {
     private $folders;
     private $workingDir;
     private $configFile;
+    private $logger;
 
     public function __construct($configFile, $workingDir = null) {
         // Stocker le chemin du fichier de configuration
@@ -35,14 +36,23 @@ class Mailbox {
         $inputNamespace = "Mailbxzip\\Cli\\In\\" . $inputClass;
         $outputNamespace = "Mailbxzip\\Cli\\Out\\" . $outputClass;
 
-        $this->inputHandler = new $inputNamespace($this->config);
-        $this->outputHandler = new $outputNamespace($this->config);
+        $this->inputHandler = new $inputNamespace($this->config, $this);
+        $this->outputHandler = new $outputNamespace($this->config, $this);
 
         // Stocker le dossier de travail
         $this->workingDir = $workingDir;
 
         // Créer les répertoires nécessaires
         $this->createDirectories();
+    }
+
+    public function getConfig() {
+        return $this->config;
+    }
+
+    public function log($message, $level = 'INFO') {
+        $this->updateState($message);
+        $this->logger->log($message, $level);
     }
 
     public function start() {
@@ -57,26 +67,68 @@ class Mailbox {
 
     private function getFolders() {
         // Récupérer la structure du compte e-mail
-        $this->folders = $this->inputHandler->getFolders();
-        
-        $this->config['emailArchivePath'] = $this->config['archives_dir'].'/'.$this->config['address'];
-        if (!is_dir($this->config['emailArchivePath'])) {
-            mkdir($this->config['emailArchivePath'], 0777, true);
-        }
-        
+        $this->folders = $this->inputHandler->getFolders();        
         $this->outputHandler->setFolders($this->folders['folders']);
     }
 
     private function process() {
+        // Initialiser le compteur pour le nombre total d'emails
+        $totalEmails = 0;
+
+        // Parcourir le tableau des emails pour compter le nombre total d'emails
         $emails = $this->inputHandler->getEmails();
-        foreach ($emails as $folder=> $emailIds) {
-            foreach($emailIds as $emailId) {
-                $this->updateState('get email '.$emailId);
-                $eml = $this->inputHandler->getEmail($emailId, $folder);
-                $this->outputHandler->saveEmails($eml);
-            }
-            
+        foreach ($emails as $folder => $emailIds) {
+            $totalEmails += count($emailIds);
         }
+
+        // Enregistrer le nombre total d'emails dans le journal
+        $this->log("Total emails to save: $totalEmails");
+
+        // Initialiser le compteur pour le nombre total d'emails importés
+        $importedEmails = 0;
+
+        // Chemin du fichier JSON dans le dossier archives
+        $jsonFilePath = $this->config['archives_dir'] . '/saved_emails.json';
+
+        // Créer ou ouvrir le fichier JSON
+        if (file_exists($jsonFilePath)) {
+            $savedEmails = json_decode(file_get_contents($jsonFilePath), true);
+        } else {
+            $savedEmails = [];
+        }
+
+        // Parcourir les emails pour les enregistrer
+        foreach ($emails as $folder => $emailIds) {
+            $this->log("saving folder $folder : " . count($emailIds) . " email(s)");
+            foreach ($emailIds as $key => $emailId) {
+                // Vérifier si le dossier existe dans le fichier JSON
+                if (!isset($savedEmails[$folder])) {
+                    $savedEmails[$folder] = [];
+                }
+
+                // Vérifier si l'ID de l'email est déjà présent dans le dossier correspondant
+                if (!in_array($emailId, $savedEmails[$folder])) {
+                    $this->log("saving e-mail ($emailId) $key/" . count($emailIds));
+                    $this->updateState('get email ' . $emailId);
+                    $eml = $this->inputHandler->getEmail($emailId, $folder);
+                    $this->outputHandler->saveEmails($eml);
+
+                    // Ajouter l'ID de l'email à la liste des emails enregistrés dans le dossier correspondant
+                    $savedEmails[$folder][] = $emailId;
+
+                    // Enregistrer la liste des emails enregistrés dans le fichier JSON après chaque enregistrement
+                    file_put_contents($jsonFilePath, json_encode($savedEmails, JSON_PRETTY_PRINT));
+
+                    // Incrémenter le compteur d'emails importés
+                    $importedEmails++;
+                } else {
+                    $this->log("e-mail ($emailId) already saved in folder $folder, skipping");
+                }
+            }
+        }
+
+        // Enregistrer le nombre total d'emails importés dans le journal
+        $this->log("Total emails imported: $importedEmails");
     }
 
     private function createDirectories() {
@@ -93,6 +145,13 @@ class Mailbox {
                 mkdir($directory, 0755, true);
             }
         }
+
+        $this->config['emailArchivePath'] = $this->config['archives_dir'].'/'.$this->config['address'];
+        if (!is_dir($this->config['emailArchivePath'])) {
+            mkdir($this->config['emailArchivePath'], 0777, true);
+        }
+
+        $this->logger = new Log($this->config['emailArchivePath'].'/export.log');
     }
 
     public function getArchivesPath() {
@@ -120,7 +179,12 @@ class Mailbox {
         // Convertir le tableau de configuration en format INI
         $iniString = '';
         foreach ($this->config as $key => $value) {
-            $iniString .= "$key = $value\n";
+            // Vérifier si la valeur est de type chaîne et ajouter des guillemets autour de la valeur
+            if (is_string($value)) {
+                $iniString .= "$key = \"$value\"\n";
+            } else {
+                $iniString .= "$key = $value\n";
+            }
         }
 
         // Écrire les nouvelles valeurs dans le fichier de configuration

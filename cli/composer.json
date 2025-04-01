@@ -19,6 +19,11 @@
         "zbateson/mail-mime-parser": "^3.0",
         "symfony/console": "^7.2",
         "symfony/lock": "^7.2",
-        "twig/twig": "^3.0"
+        "twig/twig": "^3.0",
+        "tecnickcom/tcpdf": "^6.8",
+        "setasign/fpdi": "^2.6",
+        "fpdf/fpdf": "^1.86",
+        "setasign/fpdf": "^1.8",
+        "mpdf/mpdf": "^8.2"
     }
 }

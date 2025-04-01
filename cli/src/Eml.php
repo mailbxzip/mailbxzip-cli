@@ -54,6 +54,11 @@ class Eml {
     public function get() {
         return $this->get;
     }
+
+    public function getAttachments() {
+        return $this->get['attachments'];
+    }
+
     // Méthode pour obtenir les informations du fichier EML et les stocker dans un tableau associatif
     private function decode() {
         $parser = new \ZBateson\MailMimeParser\MailMimeParser();
@@ -67,33 +72,77 @@ class Eml {
             'bcc' => $message->getHeaderValue('bcc'),
             'date' => $message->getHeaderValue('date'),
             'body' => $message->getTextContent(),
-            'htmlBody' => $message->getHtmlContent(),
+            'htmlBody' => $this->repairHtmlContent($message->getHtmlContent()),
             'attachments' => []
         ];
 
         foreach ($message->getAllAttachmentParts() as $attachment) {
-            $info['attachments'][] = [
-                'filename' => $attachment->getFilename(),
-                'contentType' => $attachment->getContentType(),
-                'size' => $attachment->getSize()
-            ];
+            $content = $attachment->getContent();
+            $size = strlen($content);
+
+            if (!is_null($attachment->getFilename())) {
+                $info['attachments'][] = [
+                    'filename' => $this->sanitizeFilename($attachment->getFilename()),
+                    'contentType' => $attachment->getContentType(),
+                    'size' => $size,
+                    'humanSize' => $this->formatSizeUnits($size),
+                    'content' => $content
+                ];
+            }
         }
-        var_dump($info['attachments']);
         return $info;
+    }
+
+    private function repairHtmlContent($htmlContent) {
+        // Vérifier si le contenu HTML est une chaîne vide
+        if (empty($htmlContent)) {
+            return $htmlContent;
+        }
+
+        // Créer une nouvelle instance de Dom\HTMLDocument
+        $doc = new \DOMDocument();
+
+        // Charger le contenu HTML
+        @$doc->loadHTML($htmlContent);
+
+        // Exporter le contenu HTML réparé
+        return $doc->saveHTML();
+    }
+
+    private function formatSizeUnits($bytes) {
+        if ($bytes >= 1073741824) {
+            $bytes = number_format($bytes / 1073741824, 2) . ' Go';
+        } elseif ($bytes >= 1048576) {
+            $bytes = number_format($bytes / 1048576, 2) . ' Mo';
+        } elseif ($bytes >= 1024) {
+            $bytes = number_format($bytes / 1024, 2) . ' Ko';
+        } elseif ($bytes > 1) {
+            $bytes = $bytes . ' octets';
+        } elseif ($bytes == 1) {
+            $bytes = $bytes . ' octet';
+        } else {
+            $bytes = '0 octets';
+        }
+
+        return $bytes;
     }
 
     public function filename(): string {
         try {
             $data = $this->get();
+
+            if(substr($data['date'], -2) == 'UT') {
+                $data['date'] .= 'C';
+            }
             $date = new \DateTime($data['date']);
             $formattedDate = $date->format('Y-m-d');
 
-            $from = $data['from'];
+            $from = $data['from'] ?? '';
             if (preg_match('/<(.+?)>/', $data['from'], $matches)) {
                 $from = $matches[1];
             }
 
-            $to = $data['to'];
+            $to = $data['to'] ?? '';
             if ($from === $this->originAddress) {
                 if (preg_match('/<(.+?)>/', $to, $matches)) {
                     $from = $matches[1];
@@ -102,17 +151,18 @@ class Eml {
                 }
             }
 
+            $from = explode('@', $from)[0];
             $from = $this->sanitizeFilename($from);
 
-            $filename = sprintf('%s - %s - %d',
+            $filename = sprintf('%s - %s - %s',
                 $formattedDate,
                 $from,
                 $data['subject']
             );
 
-            return $filename;
+            return $this->sanitizeFilename($filename);
         } catch (Exception $e) {
-            return sprintf('email-%d', $emailNumber);
+            return sprintf('email-%d', $this->uid);
         }
     }
 

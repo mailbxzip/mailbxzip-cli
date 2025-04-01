@@ -7,10 +7,15 @@ use RuntimeException;
 
 class Test {
     private $config;
-
-    public function __construct($config) {
-        // Charger la configuration
+    private $mailbox;
+    public function __construct($config, Mailbox $mailbox = null) {
         $this->config = $config;
+        $this->mailbox = $mailbox;
+        // ... existing code ...
+    }
+
+    public function getConfig() {
+        return (!is_null($this->mailbox)) ? $this->mailbox->getConfig() : $this->config;
     }
 
     public function setFolders($folders) {
