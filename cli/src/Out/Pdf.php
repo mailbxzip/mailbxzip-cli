@@ -8,15 +8,20 @@ use Exception;
 use RuntimeException;
 use Mpdf\Mpdf;
 
+/**
+ * Class Pdf
+ *
+ * This class handles the export of emails to PDF format.
+ * It includes methods for setting folders, saving emails, and converting HTML to PDF.
+ */
 class Pdf {
     public const HELP = 'Export e-mails to pdf in folders and subfolders';
 
     public const MINIMAL_CONFIG_VAR = [
-
+        'out' => 'Pdf'
     ];
 
     public const CONFIG_VAR = [
-        'wSource' => '(1|0) store eml source file in source subdir default 0',
         'debugHtml' => '(1|0) store html source of pdf for debugging',
     ];
 
@@ -26,80 +31,102 @@ class Pdf {
     private $config;
     private $mailbox;
 
+    /**
+     * Pdf constructor.
+     *
+     * @param array $config Configuration array.
+     * @param \Mailbxzip\Cli\Mailbox|null $mailbox Mailbox instance.
+     */
     public function __construct($config, \Mailbxzip\Cli\Mailbox $mailbox = null) {
-        // Charger la configuration
+        // Load the configuration
         $this->config = $config;
         $this->mailbox = $mailbox;
     }
 
+    /**
+     * Get the configuration.
+     *
+     * @return array The configuration array.
+     */
     public function getConfig() {
         return (!is_null($this->mailbox)) ? $this->mailbox->getConfig() : $this->config;
     }
 
+    /**
+     * Set the folders for email archiving.
+     *
+     * @param array $folders Array of folders to set.
+     * @throws RuntimeException If unable to create a folder.
+     */
     public function setFolders($folders) {
-        // Vérifier si la clé 'emailArchivePath' existe dans la configuration
+        // Check if the 'emailArchivePath' key exists in the configuration
         if (!isset($this->getConfig()['emailArchivePath'])) {
-            // Créer la clé 'emailArchivePath' avec un chemin par défaut
-            $this->getConfig()['emailArchivePath'] = '/chemin/par/defaut/vers/archives';
+            // Create the 'emailArchivePath' key with a default path
+            $this->getConfig()['emailArchivePath'] = '/default/path/to/archives';
         }
 
         $basePath = $this->getConfig()['emailArchivePath'];
 
-        // Parcourir chaque clé du tableau $folders
+        // Iterate over each key in the $folders array
         foreach ($folders as $folder => $nb) {
-            // Construire le chemin complet du dossier
+            // Build the full path of the folder
             $folderPath = $basePath . DIRECTORY_SEPARATOR . $folder;
 
-            // Créer le dossier si il n'existe pas déjà
+            // Create the folder if it does not already exist
             if (!is_dir($folderPath)) {
                 if (!mkdir($folderPath, 0777, true)) {
-                    throw new RuntimeException("Impossible de créer le dossier: $folderPath");
+                    throw new RuntimeException("Unable to create folder: $folderPath");
                 }
             }
         }
     }
 
+    /**
+     * Save emails to PDF format.
+     *
+     * @param object $eml Email object.
+     */
     public function saveEmails($eml) {
         $html = $eml->view('pdf/mail.html');
         $html = $this->convertToUtf8($html);
         $pdfFilePath = $this->pdfSavePath($eml);
-        $this->html2pdf($html, $pdfFilePath);
 
-        // Vérifier si l'entrée 'wSource' existe dans la configuration et est égale à 1
-        if (isset($this->getConfig()['wSource']) && $this->getConfig()['wSource'] == 1) {
-            $this->saveSource($eml);
+        try {
+            $this->html2pdf($html, $pdfFilePath);
+        } catch (Exception $e) {
+            // If html2pdf fails, save the source
+            $this->mailbox->saveSource($eml, true);
+            // Optionally, you can log the error
+            $this->mailbox->log('Unable to save PDF file', 'ERROR');
+            $this->mailbox->log($e->getMessage(), 'ERROR');
         }
 
         $this->attachFilesToPdf($eml, $pdfFilePath);
     }
 
-    private function saveSource($eml) {
-        if (!is_dir($this->sourcePath($eml))) {
-            if (!mkdir($this->sourcePath($eml), 0777, true)) {
-                throw new RuntimeException("Impossible de créer le dossier: ".$this->sourcePath());
-            }
-        }
-        file_put_contents($this->emlSavePath($eml), $eml->getContent());
-    }
-
+    /**
+     * Get the PDF save path for an email.
+     *
+     * @param object $eml Email object.
+     * @return string The PDF save path.
+     */
     private function pdfSavePath($eml) {
         return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/'.$eml->filename().'.pdf';
     }
 
-    private function emlSavePath($eml) {
-        return $this->sourcePath($eml).$eml->filename().'.eml';
-    }
-
-    private function sourcePath($eml) {
-        return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/.eml/';
-    }
-
+    /**
+     * Convert HTML content to PDF.
+     *
+     * @param string $htmlContent HTML content to convert.
+     * @param string $pdfFilePath Path to save the PDF file.
+     * @return bool True if successful, false otherwise.
+     */
     private function html2pdf($htmlContent, $pdfFilePath) {
-        // Vérifier si la variable debugHtml est définie et égale à 1
+        // Check if the debugHtml variable is defined and equal to 1
         if (isset($this->getConfig()['debugHtml']) && $this->getConfig()['debugHtml'] == 1) {
-            // Construire le chemin du fichier HTML de débogage
+            // Build the path of the HTML debug file
             $htmlDebugFilePath = str_replace('.pdf', '.html', $pdfFilePath);
-            // Enregistrer le contenu HTML dans le fichier de débogage
+            // Save the HTML content to the debug file
             file_put_contents($htmlDebugFilePath, $htmlContent);
         }
         $htmlContent = $this->chunkHtml($htmlContent);
@@ -107,53 +134,71 @@ class Pdf {
             $mpdf = new Mpdf();
             $mpdf->allow_charset_conversion=true;
             $mpdf->charset_in='UTF-8';
-            foreach ($htmlContent as $htmlChunk) {
-                //var_dump($htmlChunk);
+            foreach ($htmlContent as $key => $htmlChunk) {
                 $mpdf->WriteHTML($htmlChunk);
             }
             $mpdf->OutputFile($pdfFilePath);
             return true;
         } catch (Exception $e) {
-
-            var_dump($e->getMessage());
+            $this->mailbox->log($e->getMessage(), 'ERROR');
             return false;
         } catch (Error $e) {
-            var_dump($e->getMessage());
+            $this->mailbox->log($e->getMessage(), 'ERROR');
             return false;
         }
     }
 
+    /**
+     * Chunk HTML content into smaller parts.
+     *
+     * @param string $htmlContent HTML content to chunk.
+     * @return array Array of HTML chunks.
+     */
     private function chunkHtml($htmlContent) {
-        //return [$htmlContent];
-        if(strlen($htmlContent) <= 10000) {
+        if(strlen($htmlContent) <= 1000000) {
             return [$htmlContent];
         }
-        //return str_split($htmlContent, 10000);
-        $separators = ['</div>', '</br>', '<hr>', '</p>', '</br>', '</span>'];
-        $chunks = [$htmlContent];
-        $i = 0;
-        while (count($chunks) == 1 && $i <= (count($separators)-1)) {
-            $chunks = array_map(function ($elem) use($separators, $i) {
-                return $elem.$separators[$i];
-            }, explode($separators[$i], $htmlContent));
-            $i ++;
+
+        // Define possible separators
+        $separators = ['</div>', '</p>', '<br>', '</br>', '</h1>', '</h2>', '</h3>', '</h4>', '</h5>', '</h6>', '</ul>', '</ol>', '</li>', '</table>', '</tr>', '</td>', '</th>'];
+
+        // Initialize variables to store the best separator and the maximum number of parts
+        $bestSeparator = '';
+        $maxChunks = 0;
+
+        // Iterate over each separator to find the one that maximizes the number of parts
+        foreach ($separators as $separator) {
+            $chunks = explode($separator, $htmlContent);
+            if (count($chunks) > $maxChunks) {
+                $maxChunks = count($chunks);
+                $bestSeparator = $separator;
+            }
         }
-        foreach ($chunks as $chunk) {
-            var_dump(strlen($chunk));
-        }
-        return $chunks;
+
+        // Split the HTML content using the best separator found
+        $finalChunks = explode($bestSeparator, $htmlContent);
+
+        // Return the parts of the HTML content
+        return $finalChunks;
     }
 
+    /**
+     * Attach files to the PDF.
+     *
+     * @param object $eml Email object.
+     * @param string $pdfFilePath Path to the PDF file.
+     * @throws RuntimeException If unable to create a temporary directory.
+     */
     private function attachFilesToPdf($eml, $pdfFilePath) {
         $attachments = $eml->getAttachments();
 
         if (!empty($attachments)) {
-            // Utiliser mPDF pour ajouter des annotations de fichiers
+            // Use mPDF to add file annotations
             $mpdf = new Mpdf(['allowAnnotationFiles' => true]);
             $mpdf->allow_charset_conversion=true;
             $mpdf->charset_in='UTF-8';
 
-            // Importer les pages existantes du PDF
+            // Import existing pages from the PDF
             $pageCount = $mpdf->SetSourceFile($pdfFilePath);
             for ($pageNo = 1; $pageNo <= $pageCount; $pageNo++) {
                 $templateId = $mpdf->ImportPage($pageNo);
@@ -163,15 +208,15 @@ class Pdf {
                 }
             }
 
-            // Créer un dossier temporaire pour les pièces jointes
+            // Create a temporary directory for attachments
             $tmpDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . uniqid('attachments_', true);
             if (!mkdir($tmpDir, 0777, true)) {
-                throw new RuntimeException("Impossible de créer le dossier temporaire: $tmpDir");
+                throw new RuntimeException("Unable to create temporary directory: $tmpDir");
             }
 
-            // Ajouter des annotations de fichiers
+            // Add file annotations
             foreach ($attachments as $attachment) {
-                // Vérifier si le nom de fichier est vide et lui donner un nom générique si nécessaire
+                // Check if the filename is empty and give it a generic name if necessary
                 $filename = !empty($attachment['filename']) ? $attachment['filename'] : 'attachment_' . uniqid() . '.bin';
                 $attachmentPath = $tmpDir . DIRECTORY_SEPARATOR . $filename;
                 file_put_contents($attachmentPath, $attachment['content']);
@@ -181,11 +226,16 @@ class Pdf {
 
             $mpdf->Output($pdfFilePath, 'F');
 
-            // Supprimer le dossier temporaire et son contenu
+            // Delete the temporary directory and its contents
             $this->deleteDirectory($tmpDir);
         }
     }
 
+    /**
+     * Delete a directory and its contents.
+     *
+     * @param string $dir Directory to delete.
+     */
     private function deleteDirectory($dir) {
         if (!is_dir($dir)) {
             return;
@@ -199,15 +249,27 @@ class Pdf {
         rmdir($dir);
     }
 
+    /**
+     * Convert HTML content to UTF-8.
+     *
+     * @param string $htmlContent HTML content to convert.
+     * @return string Converted HTML content.
+     */
     private function convertToUtf8($htmlContent) {
-        // Convertir le contenu HTML en UTF-8
+        // Convert the HTML content to UTF-8
         return mb_convert_encoding($htmlContent, 'UTF-8', mb_detect_encoding($htmlContent));
     }
 
+    /**
+     * Pre-function hook.
+     */
     public function preFunc() {
         //echo 'start';
     }
 
+    /**
+     * Post-function hook.
+     */
     public function postFunc() {
         //echo 'end';
     }

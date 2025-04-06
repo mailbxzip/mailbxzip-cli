@@ -1,4 +1,5 @@
 <?php
+ini_set("pcre.backtrack_limit", "5000000");
 require_once 'vendor/autoload.php';
 
 use Symfony\Component\Console\Application;
@@ -116,6 +117,61 @@ class ConfigCommand extends Command
     public function __construct()
     {
         parent::__construct('config');
+        $this->generateHelp();
+    }
+
+    private function generateHelp()
+    {
+        $help = "";
+        $help .= "Config file format : \n\n";
+        $help .= $this->generateHelpFromClass("Mailbxzip\Cli\Mailbox");
+        
+        // Parcourir le dossier src/In et appeler chaque classe présente dans chaque fichier
+        $directory = __DIR__ . '/src/In';
+        
+        if (is_dir($directory)) {
+            $files = scandir($directory);
+            foreach ($files as $file) {
+                if ($file !== '.' && $file !== '..') {
+                    
+                    $className = pathinfo($file, PATHINFO_FILENAME);
+                    $fullClassName = "Mailbxzip\\Cli\\In\\" . $className;
+                    var_dump($fullClassName);
+                    if (class_exists($fullClassName)) {
+                        
+                        $help .= $this->generateHelpFromClass($fullClassName);
+                    }
+                }
+            }
+        }
+        
+        $this->setHelp($help);
+    }
+
+    private function generateHelpFromClass($className)
+    {
+        $help = "";
+        if(defined("$className::HELP")) {
+            $help .= "$className : ".$className::HELP."\n";
+        }
+
+        if(defined("$className::MINIMAL_CONFIG_VAR")) {
+            $help .= "\tMinimal config :\n";
+            foreach ($className::MINIMAL_CONFIG_VAR as $key => $value) {
+                $help .= "\t$key = $value \n";
+            }
+            $help .= "\n";
+        }
+        
+        if(defined("$className::CONFIG_VAR")) {
+            $help .= "\tOptional config :\n";
+            foreach ($className::CONFIG_VAR as $key => $value) {
+                $help .= "\t$key = $value \n";
+            }
+            $help .= "\n";
+        }
+        
+        return $help;
     }
 
     protected function configure()
@@ -124,7 +180,8 @@ class ConfigCommand extends Command
             ->setDescription('Manage configurations files.')
             ->addOption('addConfig', null, InputOption::VALUE_NONE, 'Add a new configuration')
             ->addOption('listConfig', null, InputOption::VALUE_NONE, 'List all configurations')
-            ->addOption('stateConfig', null, InputOption::VALUE_NONE, 'Show the state of the configuration');
+            ->addOption('stateConfig', null, InputOption::VALUE_NONE, 'Show the state of the configuration')
+            ->addOption('option', null, InputOption::VALUE_NONE, 'show config file help');
             
     }
 
