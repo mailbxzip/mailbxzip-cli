@@ -125,7 +125,7 @@ class ConfigCommand extends Command
         $help = "";
         $help .= "Config file format : \n\n";
         $help .= $this->generateHelpFromClass("Mailbxzip\Cli\Mailbox");
-        
+        $help .= "\nIN\n";
         // Parcourir le dossier src/In et appeler chaque classe présente dans chaque fichier
         $directory = __DIR__ . '/src/In';
         
@@ -144,7 +144,25 @@ class ConfigCommand extends Command
                 }
             }
         }
+        $help .= "\nOUT\n";
+        // Parcourir le dossier src/In et appeler chaque classe présente dans chaque fichier
+        $directory = __DIR__ . '/src/Out';
         
+        if (is_dir($directory)) {
+            $files = scandir($directory);
+            foreach ($files as $file) {
+                if ($file !== '.' && $file !== '..') {
+                    
+                    $className = pathinfo($file, PATHINFO_FILENAME);
+                    $fullClassName = "Mailbxzip\\Cli\\Out\\" . $className;
+                    var_dump($fullClassName);
+                    if (class_exists($fullClassName)) {
+                        
+                        $help .= $this->generateHelpFromClass($fullClassName);
+                    }
+                }
+            }
+        }
         $this->setHelp($help);
     }
 
@@ -158,7 +176,7 @@ class ConfigCommand extends Command
         if(defined("$className::MINIMAL_CONFIG_VAR")) {
             $help .= "\tMinimal config :\n";
             foreach ($className::MINIMAL_CONFIG_VAR as $key => $value) {
-                $help .= "\t$key = $value \n";
+                $help .= "\t\t$key = $value \n";
             }
             $help .= "\n";
         }
@@ -166,7 +184,7 @@ class ConfigCommand extends Command
         if(defined("$className::CONFIG_VAR")) {
             $help .= "\tOptional config :\n";
             foreach ($className::CONFIG_VAR as $key => $value) {
-                $help .= "\t$key = $value \n";
+                $help .= "\t\t$key = $value \n";
             }
             $help .= "\n";
         }

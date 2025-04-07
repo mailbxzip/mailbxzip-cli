@@ -6,6 +6,12 @@ use Exception;
 use RuntimeException;
 
 class Test {
+    public const HELP = 'Fake email output for test only';
+
+    public const MINIMAL_CONFIG_VAR = [
+        'out' => 'Test'
+    ];
+
     private $config;
     private $mailbox;
     public function __construct($config, Mailbox $mailbox = null) {

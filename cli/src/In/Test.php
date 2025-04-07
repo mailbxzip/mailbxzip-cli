@@ -6,6 +6,14 @@ use Exception;
 use RuntimeException;
 
 class Test {
+    public const HELP = 'Fake eml email for test only';
+
+    public const MINIMAL_CONFIG_VAR = [
+        'In' => 'Test'
+    ];
+
+    public const CAN_DELETE = false;
+
     private $config;
 
     public function __construct($config) {
