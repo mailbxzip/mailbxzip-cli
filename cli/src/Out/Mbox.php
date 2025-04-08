@@ -81,7 +81,7 @@ class Mbox {
     public function saveEmails($eml) {
 
         try {
-            file_put_contents($this->savePath($eml), $eml->getContent());
+            file_put_contents($this->savePath($eml), $eml->getContent()."\n", FILE_APPEND);
         } catch (Exception $e) {
             // If html2pdf fails, save the source
             $this->mailbox->saveSource($eml, true);
@@ -98,7 +98,7 @@ class Mbox {
      * @return string The PDF save path.
      */
     private function savePath($eml) {
-        return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/'.$eml->filename().'.eml';
+        return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/email.mbox';
     }
 
     /**
