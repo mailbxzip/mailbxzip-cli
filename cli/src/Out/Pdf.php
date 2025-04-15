@@ -26,7 +26,6 @@ class Pdf {
     ];
 
     public const CAN_DELETE = true;
-    public const CAN_SAVE_SOURCE = true;
 
     private $config;
     private $mailbox;
