@@ -4,6 +4,7 @@ namespace Mailbxzip\Cli;
 
 use Exception;
 use RuntimeException;
+use Mailbxzip\Cli\Contract\DeletableInputInterface;
 use Mailbxzip\Cli\Contract\InputHandlerInterface;
 use Mailbxzip\Cli\Contract\OutputHandlerInterface;
 
@@ -26,6 +27,7 @@ class Mailbox {
 
     public const CONFIG_VAR = [
         'wSource' => '(1|0) store eml source in separate "source" folder',
+        'delete' => '(1|0) DESTRUCTIVE: remove the archived messages from the source, once the zip exists',
     ];
 
     /**
@@ -168,6 +170,9 @@ class Mailbox {
         $destFile = $this->config['archives_dir'] . '/' . basename($this->configFile) . '.zip';
         $this->createZipArchive($sourceDir, $destFile);
 
+        // Only once the archive exists on disk may the source be emptied.
+        $this->purgeSource($destFile);
+
         // Record the end timestamp
         $this->endTime();
 
@@ -267,6 +272,96 @@ class Mailbox {
         if ($failedEmails > 0) {
             $this->log("$failedEmails e-mail(s) could not be saved and will be retried on the next run", 'ERROR');
         }
+    }
+
+    /**
+     * Remove from the source the messages that are now archived.
+     *
+     * Deliberately the very last step, and guarded four times over: the
+     * operation cannot be undone, so it only runs when the configuration asks
+     * for it, when both connectors vouch for it, and when the zip archive
+     * actually exists.
+     *
+     * The messages to purge are read from saved_emails.json rather than from
+     * this run alone: a resumed export must also empty what earlier runs had
+     * already written.
+     *
+     * @param string $zipFile The archive that must exist beforehand.
+     */
+    private function purgeSource($zipFile) {
+        if (!$this->deletionRequested()) {
+            return;
+        }
+
+        if (!is_file($zipFile) || filesize($zipFile) === 0) {
+            $this->log('deletion skipped: the zip archive was not produced', 'ERROR');
+            return;
+        }
+
+        $this->assertDeletionAllowed();
+
+        $jsonFilePath = $this->config['emailArchivePath'] . '/saved_emails.json';
+        $saved = is_file($jsonFilePath) ? (json_decode(file_get_contents($jsonFilePath), true) ?: []) : [];
+
+        $purgedFilePath = $this->config['emailArchivePath'] . '/purged_emails.json';
+        $purged = is_file($purgedFilePath) ? (json_decode(file_get_contents($purgedFilePath), true) ?: []) : [];
+
+        $total = 0;
+
+        foreach ($saved as $folder => $ids) {
+            // Never ask twice for the same message.
+            $pending = array_values(array_diff($ids, $purged[$folder] ?? []));
+
+            if ($pending === []) {
+                continue;
+            }
+
+            $this->log('deleting ' . count($pending) . " archived e-mail(s) from folder $folder");
+
+            try {
+                $removed = $this->inputHandler->deleteEmails($folder, $pending);
+            } catch (\Throwable $e) {
+                $this->log("deletion failed for folder $folder: ".$e->getMessage(), 'ERROR');
+                continue;
+            }
+
+            $total += $removed;
+            $purged[$folder] = array_values(array_unique(array_merge($purged[$folder] ?? [], $pending)));
+            file_put_contents($purgedFilePath, json_encode($purged, JSON_PRETTY_PRINT));
+        }
+
+        $this->log("Total emails deleted from the source: $total");
+    }
+
+    /**
+     * Whether the configuration asks for the source to be emptied.
+     */
+    private function deletionRequested() {
+        return isset($this->config['delete']) && (string) $this->config['delete'] === '1';
+    }
+
+    /**
+     * Refuse to delete anything unless both connectors allow it.
+     *
+     * @throws RuntimeException When the combination is not permitted.
+     */
+    private function assertDeletionAllowed() {
+        $input = get_class($this->inputHandler);
+        $output = get_class($this->outputHandler);
+
+        if (!$this->inputHandler instanceof DeletableInputInterface) {
+            throw new RuntimeException("'delete = 1' was asked for, but the input connector $input cannot remove messages from its source.");
+        }
+
+        if (!defined("$input::CAN_DELETE") || $input::CAN_DELETE !== true) {
+            throw new RuntimeException("'delete = 1' was asked for, but the input connector $input does not allow it.");
+        }
+
+        if (!defined("$output::CAN_DELETE") || $output::CAN_DELETE !== true) {
+            throw new RuntimeException("'delete = 1' was asked for, but the output connector $output does not vouch for its archive: refusing to empty the source.");
+        }
+
+        $this->isConfigEntryAllowed('delete');
     }
 
     /**

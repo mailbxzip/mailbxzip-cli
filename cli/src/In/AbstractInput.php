@@ -30,6 +30,13 @@ abstract class AbstractInput implements InputHandlerInterface {
         'before' => 'only export messages sent strictly before this date (YYYY-MM-DD)',
     ];
 
+    /**
+     * Configuration entry understood by the connectors able to delete.
+     */
+    public const TRASH_CONFIG_VAR = [
+        'trash' => 'with delete = 1: "1" moves the archived messages to the server trash instead of erasing them, or name the folder to move them to',
+    ];
+
     protected $config;
     protected $mailbox;
 
@@ -101,6 +108,22 @@ abstract class AbstractInput implements InputHandlerInterface {
         $range = $this->dateRange();
 
         return !is_null($range['since']) || !is_null($range['before']);
+    }
+
+    /**
+     * How the source should get rid of the archived messages.
+     *
+     * @return array{enabled: bool, folder: ?string} enabled false erases them;
+     *         a null folder asks the connector to find the trash itself.
+     */
+    protected function trashSetting(): array {
+        $value = trim((string) ($this->config['trash'] ?? ''));
+
+        if ($value === '' || $value === '0') {
+            return ['enabled' => false, 'folder' => null];
+        }
+
+        return ['enabled' => true, 'folder' => ($value === '1') ? null : $value];
     }
 
     /**

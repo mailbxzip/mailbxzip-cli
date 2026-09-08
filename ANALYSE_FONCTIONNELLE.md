@@ -51,8 +51,10 @@ dossiers, téléchargement des messages, conversion vers un format cible,
 reconstitution de l'arborescence sur disque, compression ZIP, journalisation.
 
 **Hors périmètre (à ce stade) :** interface graphique, gestion multi-comptes en
-parallèle, purge de la boîte source après archivage, chiffrement de l'archive,
-notification de fin de traitement.
+parallèle, chiffrement de l'archive, notification de fin de traitement.
+
+*(La purge de la boîte source après archivage, initialement hors périmètre, est
+désormais couverte — voir la clé `delete`.)*
 
 ---
 
@@ -126,6 +128,8 @@ Paramètres fonctionnels identifiés :
 | `debugHtml` | `1` = conserver le HTML intermédiaire à côté du PDF (mise au point). | Non |
 | `archives_dir` / `tmp_dir` | Surcharge des répertoires de travail. | Non |
 | `since` / `before` | Restreint l'export aux messages **envoyés** dans cette fenêtre (`AAAA-MM-JJ`) ; `since` incluse, `before` exclue. Poussée au serveur en IMAP. | Non |
+| `delete` | `1` = supprimer de la source les messages archivés, **une fois le ZIP écrit**. Destructif, refusé si les connecteurs ne l'autorisent pas. | Non |
+| `trash` | Avec `delete` : `1` déplace les messages vers la corbeille du serveur (détectée par `\Trash`) au lieu de les effacer, ou nommez le dossier. | Non |
 
 Clés **gérées par l'application** (écrites automatiquement dans le même
 fichier) : `status`, `state`, `progress`, `start_time`, `end_time`,
@@ -311,7 +315,7 @@ ajouter un format revient à déposer une classe dans `src/In` ou `src/Out`.
 | Sortie PDF (+ pièces jointes) | ✅ Implémentée |
 | Sortie EML | ✅ Implémentée |
 | Sortie MBOX | ✅ Implémentée |
-| Sortie HTML | ❌ Fichier vide — à réaliser |
+| Sortie HTML | ✅ Implémentée — archive navigable, index par dossier, pièces jointes liées |
 | Sortie CSV | ❌ Fichier vide — à réaliser |
 | Compression ZIP finale | ✅ Implémentée |
 | Reprise après interruption | ✅ Implémentée |

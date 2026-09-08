@@ -17,12 +17,13 @@
 | **L2** | Fiabilisation du traitement | 3,5 j | 🟠 Haute | ✅ Pertes fermées |
 | **L3** | Pilotage réel de l'export | 4 j | 🟠 Moyenne | À faire |
 | **L4** | Commande `config` opérationnelle | 3 j | 🟡 Moyenne | À faire |
-| **L5** | Connecteurs manquants | 9,25 j | 🟡 Moyenne | Socle livré |
+| **L5** | Connecteurs manquants | 7,75 j | 🟡 Moyenne | Socle livré |
 | **L6** | Reprise des acquis du prototype | 12 j | 🔵 Selon besoin produit | À arbitrer |
 | **L7** | Qualité, tests et documentation | 3,25 j | 🟢 Continue | Amorcé |
 | **L8** | Sortie de `ext-imap` (déprécié en 8.4) | 1 j | 🔴 Haute | ✅ **Livré** (reliquat) |
 | **L9** | Filtre de date à l'entrée | 0,25 j | 🟡 Moyenne | ✅ **Livré** (reliquat) |
-|  | **Total restant** | **~37,5 j** | | |
+| **L10** | Sortie HTML et purge de la source | — | 🟡 Moyenne | ✅ **Livré** |
+|  | **Total restant** | **~36 j** | | |
 
 ### Enchaînement recommandé
 
@@ -209,6 +210,75 @@ protocole : IMAP ignore l'heure et le décalage.
 
 ---
 
+## L10 — Sortie HTML et purge de la source ✅ **Livré**
+
+**Justification.** Répondre au besoin « archiver les e-mails de plus de deux
+ans en HTML, avec ou sans suppression ». Deux des trois briques manquaient :
+`Out/Html` était un fichier vide, et rien ne supprimait quoi que ce soit — la
+constante `CAN_DELETE`, déclarée par quatre classes, n'était lue nulle part.
+
+### Livré
+
+| # | Tâche | Résultat |
+|---|---|---|
+| L10.1 | Connecteur `Out/Html` | Archive navigable : une page par message, un index par dossier, un index racine, pièces jointes écrites dans un sous-dossier `<message>_files/` et liées depuis la page. Repli sur le corps texte quand le message n'a pas de partie HTML. |
+| L10.2 | Index résistants à la reprise | Les index sont bâtis depuis un manifeste `.html-index.json` tenu dans l'archive, pas depuis l'exécution courante : un export repris liste toujours les messages écrits auparavant. |
+| L10.3 | Suppression de la source | `delete = 1`, via l'interface optionnelle `DeletableInputInterface`. Implémentée par `Imap` (`STORE \Deleted` groupé puis un seul `EXPUNGE` par dossier) et `ImapLegacy`. |
+| L10.4 | `CAN_DELETE` remise en service | La constante morte trouve enfin son rôle, celui pour lequel elle avait manifestement été écrite : l'entrée déclare qu'elle sait supprimer, la sortie se porte garante de son archive. `Out/Test`, qui n'écrit rien, ne la déclare pas — une purge après un essai à blanc est donc impossible. |
+| L10.5 | Dossier `examples/` | Six configurations commentées et un README expliquant chacune, les clés disponibles, la reprise et la procédure de purge. |
+| L10.6 | Option corbeille | `trash = 1` déplace les messages archivés vers la corbeille du serveur au lieu de les effacer. Le dossier est trouvé par l'attribut `\Trash` de SPECIAL-USE (RFC 6154), à défaut par les noms usuels ; il peut aussi être nommé, avec l'un ou l'autre séparateur. |
+
+### Modèle de sûreté de la suppression
+
+Quatre conditions, toutes nécessaires :
+
+1. `delete = 1` explicitement dans la configuration ; absente par défaut.
+2. Le connecteur d'entrée implémente `DeletableInputInterface` **et** déclare
+   `CAN_DELETE = true`.
+3. Le connecteur de sortie déclare `CAN_DELETE = true`.
+4. **L'archive ZIP existe et n'est pas vide.** Sinon la purge est abandonnée et
+   l'incident journalisé.
+
+La suppression est la **toute dernière étape** de l'export, jamais entrelacée
+avec l'écriture. Les messages visés sont lus depuis `saved_emails.json`, pas
+depuis la seule exécution courante : un export repris purge aussi ce que les
+exécutions précédentes avaient écrit. `purged_emails.json` évite de redemander
+deux fois la même suppression.
+
+Une combinaison interdite s'arrête avec un message explicite plutôt que de
+supprimer.
+
+### La corbeille comme filet
+
+`trash` ajoute trois garanties au modèle ci-dessus :
+
+- **Corbeille introuvable → aucune suppression.** L'export s'arrête sur un
+  message explicite plutôt que de se rabattre sur un effacement définitif,
+  c'est-à-dire sur l'inverse de ce qui a été demandé.
+- **Copie échouée → aucun effacement** du dossier d'origine. Le message reste
+  en place et sera retenté ; `purged_emails.json` ne l'enregistre pas.
+- **Message déjà dans la corbeille → effacé sur place**, l'y déplacer n'ayant
+  pas de sens.
+
+Sur `ImapLegacy`, la détection ne peut pas lire les attributs SPECIAL-USE et se
+limite aux noms usuels.
+
+### Ce que le modèle ne couvre pas
+
+- Sans `trash`, il n'y a pas de filet : les messages sont marqués `\Deleted`
+  puis expurgés.
+- L'outil vérifie que le ZIP a été écrit, **pas qu'il est lisible**. D'où la
+  procédure en deux temps recommandée dans `examples/README.md`.
+
+### Vérifié
+
+Export complet vers un serveur IMAP de test avec `before = "2025-01-01"` et
+`delete = 1` : les 4 messages de la fenêtre archivés puis supprimés, et **le
+message hors fenêtre laissé intact** — le filtre de dates et la purge se
+composent correctement.
+
+---
+
 ## L0 — Mise en sécurité des secrets 🔴
 
 **Justification.** Des identifiants circulent en clair dans les fichiers de
@@ -303,7 +373,7 @@ quarantaine de lignes.
 |---|---|---|---|
 | ~~L5.0~~ | ~~Formaliser le contrat~~ | ✅ Livré. | — |
 | L5.1 | Entrée `In/Mbox` | Lecture d'un fichier MBOX local. Le plus simple, et complète l'aller-retour avec la sortie MBOX (à faire après L2.4, sinon il n'y a rien de conforme à relire). | 1,5 j |
-| L5.2 | Sortie `Out/Html` | Export HTML navigable (index par dossier, pièces jointes liées). Le gabarit Twig `pdf/mail.html` est largement réutilisable. | 1,5 j |
+| ~~L5.2~~ | ~~Sortie `Out/Html`~~ | ✅ Livré avec L10. | — |
 | L5.3 | Sortie `Out/Csv` | Index tabulaire (date, de, à, objet, dossier, pièces jointes), utile en complément d'un autre format pour la recherche. | 1 j |
 | L5.4 | Entrée `In/Gmail` | API Gmail + OAuth2 : consentement, jetons de rafraîchissement, quotas. **Allégé par L8** : `webklex/php-imap` gère déjà OAuth2, l'IMAP de Gmail peut suffire. | 3 j |
 | L5.5 | Entrée `In/Pst` | Archives Outlook, via `libpff` ou une bibliothèque PHP. **Étude de faisabilité à mener d'abord** : pas de solution PHP évidente. | 2 j (+ étude) |
@@ -350,8 +420,8 @@ nommage, collisions, format mbox, gabarit PDF, pièces jointes, reprise,
 `wSource`, validation des connecteurs, résilience aux écritures impossibles,
 sûreté des noms de dossiers.
 
-- `composer test` — **81 vérifications** (la section PDF s'annonce ignorée)
-- `composer run test-pdf` — **87 vérifications**, avec `ext-gd` chargée
+- `composer test` — **106 vérifications** (la section PDF s'annonce ignorée)
+- `composer run test-pdf` — **112 vérifications**, avec `ext-gd` chargée
 
 | # | Tâche | Détail | Charge |
 |---|---|---|---|

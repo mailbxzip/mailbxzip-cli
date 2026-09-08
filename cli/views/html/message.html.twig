@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ subject|default('(sans objet)') }}</title>
+    <style>
+        body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 1.5rem; color: #1a1a1a; background: #fafafa; }
+        .message { max-width: 60rem; margin: 0 auto; background: #fff; border: 1px solid #ddd; border-radius: 6px; }
+        .back { display: inline-block; margin-bottom: 1rem; color: #555; text-decoration: none; }
+        .back:hover { text-decoration: underline; }
+        .headers { padding: 1rem 1.25rem; background: #f4f4f4; border-bottom: 1px solid #ddd; border-radius: 6px 6px 0 0; }
+        .headers dl { display: grid; grid-template-columns: max-content 1fr; gap: .25rem 1rem; margin: 0; }
+        .headers dt { font-weight: 600; color: #555; }
+        .headers dd { margin: 0; overflow-wrap: anywhere; }
+        .attachments { padding: .75rem 1.25rem; border-bottom: 1px solid #ddd; background: #fffdf5; }
+        .attachments ul { margin: .25rem 0 0; padding-left: 1.25rem; }
+        .body { padding: 1.25rem; overflow-wrap: anywhere; }
+        .body pre { white-space: pre-wrap; font-family: inherit; margin: 0; }
+    </style>
+</head>
+<body>
+    <a class="back" href="index.html">&larr; {{ folder }}</a>
+
+    <div class="message">
+        <div class="headers">
+            <dl>
+                <dt>De</dt><dd>{{ from }}</dd>
+                <dt>À</dt><dd>{{ to }}</dd>
+                {% if cc is defined and cc is not empty %}<dt>Cc</dt><dd>{{ cc }}</dd>{% endif %}
+                <dt>Objet</dt><dd>{{ subject }}</dd>
+                <dt>Date</dt><dd>{{ date }}</dd>
+            </dl>
+        </div>
+
+        {% if attachments is not empty %}
+        <div class="attachments">
+            <strong>Pièces jointes</strong>
+            <ul>
+                {% for attachment in attachments %}
+                <li><a href="{{ attachmentDir }}/{{ attachment.filename|url_encode }}">{{ attachment.filename }}</a> — {{ attachment.humanSize }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% endif %}
+
+        <div class="body">
+            {# Un message en texte brut n'a pas de partie HTML. #}
+            {% if htmlBody is not empty %}
+                {{ htmlBody|raw }}
+            {% else %}
+                <pre>{{ body }}</pre>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

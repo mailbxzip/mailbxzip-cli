@@ -92,7 +92,7 @@ déduit des appels effectués par `Mailbox`.
 | `MINIMAL_CONFIG_VAR` | idem | ✅ Active |
 | `CONFIG_VAR` | idem | ✅ Active |
 | `PROHIBITED_CONFIG` | `Mailbox::isConfigEntryAllowed()` | ⚠️ Mécanisme lu, **mais déclaré par aucune classe** |
-| `CAN_DELETE` | — | ❌ Déclarée par 4 classes, **lue nulle part** |
+| `CAN_DELETE` | `Mailbox::assertDeletionAllowed()` | ✅ Active — l'entrée déclare qu'elle sait supprimer, la sortie se porte garante de son archive |
 
 Le mécanisme `PROHIBITED_CONFIG` permet à un connecteur d'interdire une option
 de configuration (lever une exception si l'utilisateur la demande). Il n'est
@@ -278,7 +278,8 @@ exception non rattrapée, qui interrompt tout l'export.
 | `Out/Eml` | ✅ conforme | |
 | `Out/Mbox` | ⚠️ | Conforme au contrat, mais produit un MBOX non standard (pas de ligne `From ` séparatrice). |
 | `Out/Test` | ❌ non conforme | Le type-hint `Mailbox $mailbox = null` n'a **pas de `use`** ni de `\` initial : il se résout en `Mailbxzip\Cli\Out\Mailbox`, classe inexistante → `TypeError` dès qu'un vrai `Mailbox` est passé. Les trois autres sorties utilisent `\Mailbxzip\Cli\Mailbox` pleinement qualifié. |
-| `Out/Html`, `Out/Csv` | — | Fichiers **vides**. |
+| `Out/Html` | ✅ conforme | Archive navigable : page par message, index par dossier et racine, pièces jointes liées. Utilise `postFunc()` pour bâtir les index. |
+| `Out/Csv` | — | Fichier **vide**. |
 
 > Conséquence directe : `cli/config.example.ini` livre `in = Test` / `out = Test`
 > comme configuration par défaut — **les deux connecteurs de démonstration sont

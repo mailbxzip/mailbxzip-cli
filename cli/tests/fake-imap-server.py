@@ -42,6 +42,13 @@ MAILBOX = {
         201: message("test@mailbxzip.com", "Re: proposition", "Tue, 16 Jan 2024 18:30:00 +0100", "Bien recu."),
     },
     "INBOX.Brouillons": {},
+    # Declared as the trash through the SPECIAL-USE attribute (RFC 6154), so
+    # the connector can find it without being told.
+    "INBOX.Trash": {},
+}
+
+FLAGS = {
+    "INBOX.Trash": "\\HasNoChildren \\Trash",
 }
 
 
@@ -53,6 +60,7 @@ class Handler(socketserver.StreamRequestHandler):
 
     def handle(self):
         self.selected = None
+        self.flagged = set()
         self.send("* OK fake-imap ready")
 
         while True:
@@ -73,7 +81,8 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send(f"{tag} OK LOGIN completed")
             elif command == "LIST":
                 for name in MAILBOX:
-                    self.send(f'* LIST (\\HasNoChildren) "." "{name}"')
+                    flags = FLAGS.get(name, "\\HasNoChildren")
+                    self.send(f'* LIST ({flags}) "." "{name}"')
                 self.send(f"{tag} OK LIST completed")
             elif command in ("SELECT", "EXAMINE"):
                 self.selected = self.unquote(" ".join(args))
@@ -87,6 +96,12 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send(f"{tag} OK SEARCH completed")
             elif command == "UID" and args and args[0].upper() == "FETCH":
                 self.fetch(tag, args[1], " ".join(args[2:]))
+            elif command == "UID" and args and args[0].upper() == "STORE":
+                self.store(tag, args[1], " ".join(args[2:]))
+            elif command == "UID" and args and args[0].upper() == "COPY":
+                self.copy(tag, args[1], self.unquote(" ".join(args[2:])))
+            elif command == "EXPUNGE":
+                self.expunge(tag)
             elif command == "LOGOUT":
                 self.send("* BYE")
                 self.send(f"{tag} OK LOGOUT completed")
@@ -145,6 +160,42 @@ class Handler(socketserver.StreamRequestHandler):
 
         self.wfile.flush()
         self.send(f"{tag} OK FETCH completed")
+
+    def copy(self, tag, sequence, destination):
+        source = MAILBOX.get(self.selected, {})
+
+        if destination not in MAILBOX:
+            self.send(f"{tag} NO [TRYCREATE] mailbox does not exist")
+            return
+
+        for uid in self.expand(sequence, source):
+            # A copy gets a fresh uid in the destination mailbox.
+            new_uid = max(MAILBOX[destination] or [1000]) + 1
+            MAILBOX[destination][new_uid] = source[uid]
+
+        self.send(f"{tag} OK COPY completed")
+
+    def store(self, tag, sequence, rest):
+        """Only \\Deleted matters here: flag the messages, expunge removes them."""
+        folder = MAILBOX.get(self.selected, {})
+
+        if "\\DELETED" in rest.upper():
+            for uid in self.expand(sequence, folder):
+                self.flagged.add((self.selected, uid))
+
+        self.send(f"{tag} OK STORE completed")
+
+    def expunge(self, tag):
+        folder = MAILBOX.get(self.selected, {})
+        removed = sorted(uid for (name, uid) in self.flagged if name == self.selected and uid in folder)
+
+        for seq, uid in enumerate(removed, start=1):
+            del folder[uid]
+            self.flagged.discard((self.selected, uid))
+            # Sequence numbers shift down as messages go, hence the constant 1.
+            self.send(f"* {seq if seq == 1 else 1} EXPUNGE")
+
+        self.send(f"{tag} OK EXPUNGE completed")
 
     @staticmethod
     def expand(sequence, folder):

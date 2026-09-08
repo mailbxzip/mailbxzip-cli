@@ -462,6 +462,136 @@ if (!$spawned && !@stream_socket_client("tcp://127.0.0.1:$imapPort", $errno, $er
     check('newer message left on the server', count(glob($filteredArchive.'/INBOX/2025-*.eml')) === 0);
     check('accented folder still exported', count(glob($filteredArchive.'/INBOX/Éléments envoyés/*.eml')) === 1);
 
+    // A dedicated server, since the purge mutates its mailbox.
+    $purgePort = 0;
+    $purgeProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+    if ($purgeProbe) {
+        $name = stream_socket_get_name($purgeProbe, false);
+        $purgePort = (int) substr($name, strrpos($name, ':') + 1);
+        fclose($purgeProbe);
+    }
+
+    $purgeProcess = @proc_open(
+        'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $purgePort",
+        [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+        $purgePipes
+    );
+
+    if (is_resource($purgeProcess)) {
+        stream_set_timeout($purgePipes[1], 5);
+        fgets($purgePipes[1]);
+
+        $dir = workingDir('imap-purge');
+        $cleanup[] = $dir;
+        $purgeConfig = writeConfig($dir, 'Imap', 'Eml', [
+            'server' => '{127.0.0.1:'.$purgePort.'/imap/notls}',
+            'username' => 'u',
+            'password' => 'p',
+            'before' => '2025-01-01',
+            'delete' => 1,
+        ]);
+
+        $purgeMailbox = new Mailbox($purgeConfig, $dir);
+        $purgeMailbox->start();
+        $purgeArchive = $dir.'/archives/test@mailbxzip.com';
+
+        check('archived messages written before any deletion', count(glob($purgeArchive.'/INBOX/*.eml')) === 3);
+        check('deletion recorded', is_file($purgeArchive.'/purged_emails.json'));
+
+        // Ask the server again: only what fell outside the window may remain.
+        $left = (new \Mailbxzip\Cli\In\Imap([
+            'address' => 'test@mailbxzip.com',
+            'host' => '127.0.0.1', 'port' => $purgePort, 'encryption' => 'none',
+            'username' => 'u', 'password' => 'p',
+        ]))->getEmails();
+
+        $remaining = array_merge(...array_values(array_map('array_values', $left)));
+
+        check('archived messages removed from the server', count($remaining) === 1);
+        check('message outside the window left untouched', in_array('104', $remaining, true));
+
+        unset($purgeMailbox);
+        gc_collect_cycles();
+        proc_terminate($purgeProcess);
+        proc_close($purgeProcess);
+    }
+
+    // --- trash mode, on its own server since the purge mutates the mailbox ---
+    $trashPort = 0;
+    $trashProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+    if ($trashProbe) {
+        $name = stream_socket_get_name($trashProbe, false);
+        $trashPort = (int) substr($name, strrpos($name, ':') + 1);
+        fclose($trashProbe);
+    }
+
+    $trashProcess = @proc_open(
+        'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $trashPort",
+        [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+        $trashPipes
+    );
+
+    if (is_resource($trashProcess)) {
+        stream_set_timeout($trashPipes[1], 5);
+        fgets($trashPipes[1]);
+
+        echo "\nTrash — archived messages moved instead of erased\n";
+
+        $server = ['server' => '{127.0.0.1:'.$trashPort.'/imap/notls}', 'username' => 'u', 'password' => 'p'];
+        $read = function () use ($trashPort) {
+            $folders = (new \Mailbxzip\Cli\In\Imap([
+                'address' => 'test@mailbxzip.com',
+                'host' => '127.0.0.1', 'port' => $trashPort, 'encryption' => 'none',
+                'username' => 'u', 'password' => 'p',
+            ]))->getEmails();
+
+            return array_map('array_values', $folders);
+        };
+
+        // A trash folder that does not exist must stop the purge, not fall
+        // back to erasing the messages.
+        $dir = workingDir('imap-trash-missing');
+        $cleanup[] = $dir;
+        $missing = new Mailbox(writeConfig($dir, 'Imap', 'Eml', $server + [
+            'before' => '2025-01-01', 'delete' => 1, 'trash' => 'INBOX/Corbeille',
+        ]), $dir);
+        $missing->start();
+
+        $log = file_get_contents($dir.'/archives/test@mailbxzip.com/export.log');
+        check('messages still archived when the trash is missing', count(glob($dir.'/archives/test@mailbxzip.com/INBOX/*.eml')) === 3);
+        check('unknown trash reported', str_contains($log, "trash folder 'INBOX/Corbeille' does not exist"));
+        check('nothing erased when the trash is missing', str_contains($log, 'Total emails deleted from the source: 0'));
+
+        $before = $read();
+        check('mailbox untouched when the trash is missing', count($before['INBOX'] ?? []) === 4);
+
+        unset($missing);
+        gc_collect_cycles();
+
+        // Now the real thing: the server advertises INBOX.Trash as \Trash.
+        $dir = workingDir('imap-trash');
+        $cleanup[] = $dir;
+        $trashed = new Mailbox(writeConfig($dir, 'Imap', 'Eml', $server + [
+            'before' => '2025-01-01', 'delete' => 1, 'trash' => 1,
+        ]), $dir);
+        $trashed->start();
+
+        $after = $read();
+        $log = file_get_contents($dir.'/archives/test@mailbxzip.com/export.log');
+
+        check('trash located through its SPECIAL-USE flag', str_contains($log, "moved to 'INBOX.Trash'"));
+        check('archived messages left their folder', count($after['INBOX'] ?? []) === 1);
+        check('message outside the window stayed put', in_array('104', $after['INBOX'] ?? [], true));
+        check('archived messages are in the trash', count($after['INBOX.Trash'] ?? []) === 4);
+
+        unset($trashed);
+        gc_collect_cycles();
+        proc_terminate($trashProcess);
+        proc_close($trashProcess);
+    }
+
     // Let the connectors close their sockets while the server is still up,
     // otherwise the teardown logs broken pipe notices.
     unset($imapMailbox, $filteredMailbox);
@@ -472,6 +602,53 @@ if (isset($process) && is_resource($process)) {
     proc_terminate($process);
     proc_close($process);
 }
+
+// ---------------------------------------------------------------- Out/Html ---
+echo "\nOut/Html — browsable archive\n";
+
+$dir = workingDir('html');
+$cleanup[] = $dir;
+(new Mailbox(writeConfig($dir, 'Test', 'Html'), $dir))->start();
+$archive = $dir.'/archives/test@mailbxzip.com';
+
+check('one page per message', count(glob($archive.'/INBOX/*.html')) === 3);   // 2 messages + index
+check('root index written', is_file($archive.'/index.html'));
+check('one index per folder', count(glob($archive.'/INBOX/*/index.html')) === 4);
+check('attachment written beside its message', is_file($archive.'/INBOX/Pieces jointes/2024-02-04-pj-Avec-piece-jointe_files/note.txt'));
+
+$page = file_get_contents($archive.'/INBOX/Pieces jointes/2024-02-04-pj-Avec-piece-jointe.html');
+check('attachment linked from the page', str_contains($page, 'href="2024-02-04-pj-Avec-piece-jointe_files/note.txt"'));
+check('plain text body rendered in the page', str_contains($page, 'Voir le document joint.'));
+
+$root = file_get_contents($archive.'/index.html');
+check('root index links every folder', substr_count($root, 'index.html">') === 5);
+check('accented folder linked and encoded', str_contains($root, 'INBOX/%C3%89l%C3%A9ments%20envoy%C3%A9s/index.html'));
+
+$folderIndex = file_get_contents($archive.'/INBOX/index.html');
+// Count message links only: the "back" link is an .html href too.
+check('folder index lists its messages', preg_match_all('/href="(?!\.\.)[^"]+\.html"/', $folderIndex) === 2);
+check('folder index links back to the root', str_contains($folderIndex, 'href="../index.html"'));
+
+// A second run must not duplicate the listing.
+(new Mailbox('test@mailbxzip.com', $dir))->start();
+check('index stable across a resumed run', file_get_contents($archive.'/INBOX/index.html') === $folderIndex);
+
+// ---------------------------------------------------------------- deletion ---
+echo "\nDeletion — guarded, and never before the archive exists\n";
+
+$dir = workingDir('delete-guards');
+$cleanup[] = $dir;
+
+fails('source unable to delete is refused', function () use ($dir) {
+    (new Mailbox(writeConfig($dir, 'Test', 'Eml', ['delete' => 1]), $dir))->start();
+}, 'cannot remove messages from its source');
+
+check('nothing deleted without the delete key', (function () use ($dir) {
+    $config = writeConfig($dir, 'Test', 'Eml');
+    (new Mailbox($config, $dir))->start();
+
+    return !is_file($dir.'/archives/test@mailbxzip.com/purged_emails.json');
+})());
 
 // ------------------------------------------------------------------ done ----
 foreach ($cleanup as $dir) {

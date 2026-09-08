@@ -3,6 +3,7 @@
 namespace Mailbxzip\Cli\In;
 
 use RuntimeException;
+use Mailbxzip\Cli\Contract\DeletableInputInterface;
 use Mailbxzip\Cli\Eml;
 use Mailbxzip\Cli\Mailbox;
 
@@ -17,8 +18,11 @@ use Mailbxzip\Cli\Mailbox;
  *             which speaks the protocol directly and needs no extension. Both
  *             honour the same contract and read the same configuration.
  */
-class ImapLegacy extends AbstractInput {
+class ImapLegacy extends AbstractInput implements DeletableInputInterface {
     private $imap;
+
+    /** @var string|null Resolved trash mailbox, looked up once */
+    private $trashFolder = null;
 
     public const HELP = 'DEPRECATED, prefer "Imap" -- import e-mails through the ext-imap extension, removed from PHP core in 8.4';
 
@@ -29,7 +33,10 @@ class ImapLegacy extends AbstractInput {
         'password' => ''
     ];
 
-    public const CONFIG_VAR = self::DATE_CONFIG_VAR;
+    public const CONFIG_VAR = self::DATE_CONFIG_VAR + self::TRASH_CONFIG_VAR;
+
+    /** This source can remove messages once they are archived. */
+    public const CAN_DELETE = true;
 
     /**
      * Imap constructor.
@@ -160,6 +167,101 @@ class ImapLegacy extends AbstractInput {
 
         // Return the email in EML format
         return new Eml($email, $this->normalizeFolderName($folder), $id, $this->config['address'] ?? null);
+    }
+
+    /**
+     * Remove messages from the server.
+     *
+     * @param array<int|string> $ids
+     */
+    public function deleteEmails(string $folder, array $ids): int {
+        if ($ids === []) {
+            return 0;
+        }
+
+        $trash = $this->trashSetting();
+        $target = $trash['enabled'] ? $this->resolveTrashFolder() : null;
+        $moving = !is_null($target) && $target !== $folder;
+
+        imap_reopen($this->imap, $folder);
+        $flagged = 0;
+
+        foreach ($ids as $id) {
+            // imap_mail_move copies then flags, so a failed move never
+            // erases the message.
+            $done = $moving
+                ? imap_mail_move($this->imap, (string) $id, $target, CP_UID)
+                : imap_delete($this->imap, (string) $id, FT_UID);
+
+            if ($done) {
+                $flagged++;
+                continue;
+            }
+
+            $this->log(
+                $moving
+                    ? "e-mail $id of folder $folder could not be moved to '$target'"
+                    : "e-mail $id of folder $folder could not be flagged for deletion, it may already be gone",
+                'WARNING'
+            );
+        }
+
+        if ($flagged > 0) {
+            imap_expunge($this->imap);
+        }
+
+        if ($moving && $flagged > 0) {
+            $this->log("$flagged e-mail(s) of folder $folder moved to '$target'");
+        }
+
+        return $flagged;
+    }
+
+    /**
+     * Find the mailbox to move deleted messages into.
+     *
+     * Unlike the Imap connector, this one cannot read the SPECIAL-USE
+     * attributes, so detection rests on the usual names only. Naming the
+     * folder in the configuration is the reliable route here.
+     *
+     * @throws RuntimeException If the trash was requested but cannot be found.
+     */
+    private function resolveTrashFolder(): string {
+        if (!is_null($this->trashFolder)) {
+            return $this->trashFolder;
+        }
+
+        $folders = imap_list($this->imap, $this->config['server'], '*') ?: [];
+        $wanted = $this->trashSetting()['folder'];
+        $known = ['trash', 'corbeille', 'deleted items', 'deleted messages', 'papierkorb', 'prullenbak', 'cestino', 'papelera'];
+
+        foreach ($folders as $path) {
+            $bare = str_replace($this->config['server'], '', (string) $path);
+            $decoded = @mb_convert_encoding($bare, 'UTF-8', 'UTF7-IMAP');
+            $decoded = is_string($decoded) && $decoded !== '' ? $decoded : $bare;
+
+            if (is_null($wanted)) {
+                $segments = explode('.', $decoded);
+
+                if (in_array(mb_strtolower((string) end($segments)), $known, true)) {
+                    return $this->trashFolder = (string) $path;
+                }
+
+                continue;
+            }
+
+            foreach ([$bare, $decoded, str_replace('.', '/', $decoded)] as $candidate) {
+                if (strcasecmp($candidate, $wanted) === 0) {
+                    return $this->trashFolder = (string) $path;
+                }
+            }
+        }
+
+        throw new RuntimeException(
+            is_null($wanted)
+                ? "'trash = 1' was asked for, but no trash folder could be found. Name it explicitly, for instance trash = \"INBOX.Trash\"."
+                : "The trash folder '$wanted' does not exist on the server."
+        );
     }
 
     /**
