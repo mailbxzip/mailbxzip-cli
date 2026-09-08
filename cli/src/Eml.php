@@ -47,6 +47,11 @@ class Eml {
         return $this->folder;
     }
 
+    // Identifiant du message dans son dossier d'origine, unique pour la source
+    public function getUid() {
+        return $this->uid;
+    }
+
     public function view($viewName) {
         return View::R($viewName, $this->get());
     }
@@ -131,6 +136,13 @@ class Eml {
         try {
             $data = $this->get();
 
+            if (empty($data['date'])) {
+                // new DateTime('') silently means "now": without this guard an
+                // undated message is filed under today's date instead of
+                // falling back to its uid.
+                throw new \RuntimeException('the message carries no Date header');
+            }
+
             if(substr($data['date'], -2) == 'UT') {
                 $data['date'] .= 'C';
             }
@@ -161,15 +173,20 @@ class Eml {
             );
 
             return $this->sanitizeFilename($filename);
-        } catch (Exception $e) {
-            return sprintf('email-%d', $this->uid);
+        } catch (\Throwable $e) {
+            // Catch \Throwable, not Exception: unqualified inside this
+            // namespace the latter resolves to Mailbxzip\Cli\Exception, which
+            // does not exist, so the fallback never ran.
+            return sprintf('email-%s', $this->uid);
         }
     }
 
     private function sanitizeFilename(string $string): string {
         $string = preg_replace('/[^\p{L}\p{N}_.-]/u', '-', $string);
         $string = preg_replace('/-+/', '-', $string);
-        $string = substr($string, 0, 50);
+        // mb_substr, not substr: cutting UTF-8 on a byte boundary splits
+        // accented characters and yields an invalid filename.
+        $string = mb_substr($string, 0, 50, 'UTF-8');
         return trim($string, '-');
     }
 }

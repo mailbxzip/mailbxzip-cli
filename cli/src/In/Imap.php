@@ -2,172 +2,302 @@
 
 namespace Mailbxzip\Cli\In;
 
-use Exception;
-use RuntimeException;
 use Mailbxzip\Cli\Eml;
+use Mailbxzip\Cli\Mailbox;
+use RuntimeException;
+use Throwable;
+use Webklex\PHPIMAP\Client;
+use Webklex\PHPIMAP\ClientManager;
+// Aliased: PHP class names are case-insensitive, so IMAP would clash with
+// this very class.
+use Webklex\PHPIMAP\IMAP as Protocol;
 
 /**
  * Class Imap
  *
- * This class handles the import of emails from IMAP/POP3/NNTP accounts.
+ * Imports e-mails from an IMAP account. This is the default IMAP connector.
+ *
+ * It speaks the protocol over a socket through webklex/php-imap, and needs no
+ * PHP extension: ext-imap was deprecated and unbundled in PHP 8.4, the
+ * c-client library behind it having gone unmaintained since 2007. The RFC that
+ * removed it names webklex/php-imap as one of two maintained replacements.
+ *
+ * The previous implementation is kept as ImapLegacy for the installations that
+ * still have ext-imap. Both honour the same contract, so a mailbox can be
+ * exported with either and the results compared. The "{host:port/imap/ssl}"
+ * server string is understood by both, so existing configurations keep
+ * working untouched.
  */
-class Imap {
-    private $config;
-    private $imap;
-    
-    public const HELP = 'Import e-mails from imap/pop3/nnp account';
+class Imap extends AbstractInput {
+
+    public const HELP = 'Import e-mails from an imap account (no PHP extension required)';
 
     public const MINIMAL_CONFIG_VAR = [
-        'In' => 'Imap',
-        'server' => 'server php string',
+        'in' => 'Imap',
+        'host' => 'imap server hostname, e.g. ssl0.ovh.net',
         'username' => '',
         'password' => ''
     ];
 
+    public const CONFIG_VAR = self::DATE_CONFIG_VAR + [
+        'port' => 'server port, 993 by default',
+        'encryption' => 'ssl (default), tls, starttls or none',
+        'validate_cert' => '(1|0) verify the TLS certificate, 1 by default',
+        'server' => 'legacy ext-imap string, e.g. {ssl0.ovh.net:993/imap/ssl}, used when host is absent',
+    ];
+
+    private $client;
+
+    /** @var array<string,string>|null Raw IMAP path => folder name on disk */
+    private $folderNames = null;
+
     /**
-     * Imap constructor.
-     *
-     * @param array $config Configuration array containing server, username, and password.
-     * @throws RuntimeException If the IMAP connection cannot be opened.
+     * @throws RuntimeException If the connection cannot be established.
      */
-    public function __construct($config) {
-        // Load the configuration
-        $this->config = $config;
+    public function __construct($config, Mailbox $mailbox = null) {
+        parent::__construct($config, $mailbox);
 
-        // Initialize the IMAP connection
-        $this->imap = imap_open(
-            $this->config['server'],
-            $this->config['username'],
-            $this->config['password']
-        );
-
-        if (!$this->imap) {
-            throw new RuntimeException('Unable to open IMAP connection');
+        try {
+            $this->client = (new ClientManager())->make($this->connectionSettings());
+            $this->client->connect();
+        } catch (Throwable $e) {
+            throw new RuntimeException('Unable to open IMAP connection: '.$e->getMessage(), 0, $e);
         }
     }
 
     /**
-     * Get the list of folders and the number of emails in each folder.
+     * Build the client settings, from explicit keys or from the legacy
+     * ext-imap server string.
      *
-     * @return array An array containing the folder structure and the total number of emails.
+     * @return array<string,mixed>
+     * @throws RuntimeException If the host cannot be determined.
      */
-    public function getFolders() {
-        // Get the list of folders
-        $folders = imap_list($this->imap, $this->config['server'], '*');
-        // Initialize an array to store the folder structure
-        $folderStructure = [];
-        $totalEmails = 0;
+    private function connectionSettings(): array {
+        $legacy = self::parseLegacyServer($this->config['server'] ?? '');
 
-        // Iterate through each folder
-        foreach ($folders as $folder) {
-            // Decode the folder name from UTF-7
-            $decodedFolder = imap_utf7_decode($folder);
+        $host = $this->config['host'] ?? $legacy['host'];
 
-            // Detect the encoding of the folder name
-            $detectedEncoding = mb_detect_encoding($decodedFolder, ['UTF-7', 'ISO-8859-1', 'Windows-1252', 'ISO-8859-15', 'CP1252'], true);
-
-            // Convert the folder name to UTF-8
-            $utf8Folder = mb_convert_encoding($decodedFolder, 'UTF-8', $detectedEncoding);
-
-            // Select the folder
-            imap_reopen($this->imap, $folder);
-
-            // Get the number of emails in the folder
-            $numEmails = imap_num_msg($this->imap);
-
-            // Remove the server name from the folder name
-            $cleanFolderName = str_replace($this->config['server'], '', $utf8Folder);
-
-            // Replace dots with slashes in subfolder names
-            $cleanFolderName = str_replace('.', '/', $cleanFolderName);
-            $cleanFolderName = str_replace("\0", "", $cleanFolderName);
-            // Add the folder and the number of emails to the structure
-            $folderStructure[$cleanFolderName] = $numEmails;
-
-            // Add the number of emails to the total
-            $totalEmails += $numEmails;
+        if ($host === '') {
+            throw new RuntimeException("The configuration needs a 'host' entry (or a legacy 'server' string).");
         }
 
-        // Return the folder structure and the total number of emails
+        $encryption = strtolower((string) ($this->config['encryption'] ?? $legacy['encryption']));
+
         return [
-            'folders' => $folderStructure,
-            'total' => $totalEmails
+            'host' => $host,
+            'port' => (int) ($this->config['port'] ?? $legacy['port']),
+            'encryption' => ($encryption === 'none' || $encryption === '') ? false : $encryption,
+            'validate_cert' => !isset($this->config['validate_cert'])
+                ? $legacy['validate_cert']
+                : (bool) $this->config['validate_cert'],
+            'username' => $this->config['username'] ?? '',
+            'password' => $this->config['password'] ?? '',
+            'protocol' => 'imap',
         ];
     }
 
     /**
-     * Get the list of email IDs in each folder.
+     * Decode an ext-imap mailbox string such as "{ssl0.ovh.net:993/imap/ssl}".
      *
-     * @return array An array containing the email IDs for each folder.
+     * @return array{host: string, port: int, encryption: string, validate_cert: bool}
      */
-    public function getEmails() {
-        $folders = imap_list($this->imap, $this->config['server'], '*');
-        $allEmails = [];
-        // Iterate through each folder
-        foreach ($folders as $folder) {
-            // Select the folder (e.g., 'INBOX')
-            imap_reopen($this->imap, $folder);
-            //imap_reopen($this->imap, 'INBOX');
-            
-            // Get the IDs of all emails in the folder
-            $emails = imap_search($this->imap, 'ALL', SE_UID);
+    public static function parseLegacyServer($server): array {
+        $settings = ['host' => '', 'port' => 993, 'encryption' => 'ssl', 'validate_cert' => true];
 
-            // Merge the found emails with the $allEmails array
-            $allEmails[$folder] = ($emails !== false) ? $emails : [];
+        if (!preg_match('/^\{([^}]+)\}/', trim((string) $server), $matches)) {
+            return $settings;
         }
 
-        // Return the array of email IDs
-        return $allEmails;
+        $parts = explode('/', $matches[1]);
+        $address = array_shift($parts);
+
+        if (str_contains($address, ':')) {
+            [$settings['host'], $port] = explode(':', $address, 2);
+            $settings['port'] = (int) $port;
+        } else {
+            $settings['host'] = $address;
+        }
+
+        foreach ($parts as $flag) {
+            switch (strtolower($flag)) {
+                case 'ssl':
+                    $settings['encryption'] = 'ssl';
+                    break;
+                case 'tls':
+                    $settings['encryption'] = 'tls';
+                    break;
+                case 'starttls':
+                    $settings['encryption'] = 'starttls';
+                    break;
+                case 'notls':
+                    $settings['encryption'] = 'none';
+                    break;
+                case 'novalidate-cert':
+                    $settings['validate_cert'] = false;
+                    break;
+                case 'validate-cert':
+                    $settings['validate_cert'] = true;
+                    break;
+            }
+        }
+
+        return $settings;
     }
 
     /**
-     * Get an email by its ID and folder.
+     * @return array{folders: array<string,int>, total: int}
+     */
+    public function getFolders(): array {
+        $structure = [];
+        $total = 0;
+
+        foreach ($this->client->getFolders(false) as $folder) {
+            $count = (int) ($folder->examine()['exists'] ?? 0);
+
+            $structure[$this->folderNameFor($folder->path)] = $count;
+            $total += $count;
+        }
+
+        return ['folders' => $structure, 'total' => $total];
+    }
+
+    /**
+     * The keys are the raw IMAP mailbox paths: getEmail() needs them to
+     * select the right mailbox.
      *
-     * @param int $id The ID of the email.
-     * @param string $folder The folder containing the email.
-     * @return Eml The email object.
+     * @return array<string,array<int|string>>
      */
-    public function getEmail($id, $folder) {
-        // Select the folder (e.g., 'INBOX')
-        imap_reopen($this->imap, $folder);
+    public function getEmails(): array {
+        $emails = [];
+        $connection = $this->client->getConnection();
 
-        // Get the email header
-        $header = imap_fetchheader($this->imap, $id, FT_UID);
+        foreach ($this->client->getFolders(false) as $folder) {
+            $connection->selectFolder($folder->path);
 
-        // Get the email body
-        $body = imap_body($this->imap, $id, FT_UID);
+            // Ask the server for uids only. Going through the query builder
+            // would fetch every header just to read them back, which is far
+            // too costly on a large mailbox.
+            $response = $connection->search($this->searchCriteria(), Protocol::ST_UID);
+            $uids = $response->successful() ? $response->data() : [];
 
-        // Concatenate the header and body to get the email in EML format
-        $email = $header . $body;
-        // Return the email in EML format
-        return new Eml($email, $this->sanitizeFolderName($folder), $id, $this->config['address']);
+            $emails[$folder->path] = is_array($uids) ? array_values($uids) : [];
+        }
+
+        return $emails;
     }
 
     /**
-     * Sanitize the folder name by removing the server name and replacing dots with slashes.
+     * Build the IMAP SEARCH criteria.
      *
-     * @param string $folder The folder name to sanitize.
-     * @return string The sanitized folder name.
+     * The date window is pushed down to the server: it answers with the
+     * matching uids only, so nothing outside the window is ever downloaded.
+     *
+     * SENTSINCE/SENTBEFORE compare the Date header, not the server's own
+     * internal date. That is deliberate: the archive names its files after
+     * that same header, and a mailbox migrated between providers carries an
+     * internal date of the migration, which would make every old message look
+     * recent.
+     *
+     * @return array<string>
      */
-    private function sanitizeFolderName($folder) {
-        $cleanFolderName = str_replace($this->config['server'], '', $folder);
+    private function searchCriteria(): array {
+        $range = $this->dateRange();
+        $criteria = [];
 
-        // Replace dots with slashes in subfolder names
-        $cleanFolderName = str_replace('.', '/', $cleanFolderName);
-        return $cleanFolderName;
+        if (!is_null($range['since'])) {
+            $criteria[] = 'SENTSINCE';
+            $criteria[] = $this->imapDate($range['since']);
+        }
+
+        if (!is_null($range['before'])) {
+            $criteria[] = 'SENTBEFORE';
+            $criteria[] = $this->imapDate($range['before']);
+        }
+
+        return $criteria === [] ? ['ALL'] : $criteria;
     }
 
     /**
-     * Pre-function hook.
+     * @param int|string $id     The UID of the message.
+     * @param string     $folder The raw IMAP mailbox path, as keyed by getEmails().
      */
-    public function preFunc() {
-        //echo 'start';
+    public function getEmail($id, $folder): Eml {
+        $connection = $this->client->getConnection();
+        $connection->selectFolder($folder);
+
+        $header = $this->fetch($connection->headers([(int) $id], 'RFC822', Protocol::ST_UID), $id, $folder, 'header');
+        $body = $this->fetch($connection->content([(int) $id], 'RFC822', Protocol::ST_UID), $id, $folder, 'body');
+
+        return new Eml($header.$body, $this->folderNameFor($folder), $id, $this->config['address'] ?? null);
     }
 
     /**
-     * Post-function hook.
+     * Pull one part of a message out of a protocol response.
+     *
+     * @throws RuntimeException If the server did not return it.
      */
-    public function postFunc() {
-        //echo 'end';
+    private function fetch($response, $id, $folder, string $what): string {
+        if (!$response->successful()) {
+            throw new RuntimeException("Unable to fetch the $what of e-mail $id in folder $folder.");
+        }
+
+        $data = $response->data();
+
+        if (is_array($data)) {
+            // Keyed by uid when several were requested, plain list otherwise.
+            $data = $data[$id] ?? reset($data);
+        }
+
+        if (!is_string($data)) {
+            throw new RuntimeException("Unexpected $what returned for e-mail $id in folder $folder.");
+        }
+
+        return $data;
+    }
+
+    /**
+     * Turn a raw IMAP mailbox path into the relative path used on disk.
+     *
+     * The mapping is built once from the folder listing and reused, so
+     * getFolders() and getEmail() cannot drift apart -- that divergence is
+     * exactly what writes messages into a directory that was never created.
+     * It also spares a round trip per message.
+     */
+    private function folderNameFor(string $path): string {
+        if (is_null($this->folderNames)) {
+            $this->folderNames = [];
+
+            foreach ($this->client->getFolders(false) as $folder) {
+                // webklex exposes the name already decoded from modified
+                // UTF-7 in full_name; only the server separator is left.
+                $name = $folder->full_name ?: $folder->path;
+                $delimiter = $folder->delimiter ?: '.';
+
+                $this->folderNames[$folder->path] = $this->folderName(str_replace($delimiter, '/', $name));
+            }
+        }
+
+        if (isset($this->folderNames[$path])) {
+            return $this->folderNames[$path];
+        }
+
+        // Unknown mailbox: decode it ourselves rather than fall back to the
+        // raw, still encoded, path.
+        $decoded = @mb_convert_encoding($path, 'UTF-8', 'UTF7-IMAP');
+
+        return $this->folderName(str_replace('.', '/', is_string($decoded) && $decoded !== '' ? $decoded : $path));
+    }
+
+    /**
+     * Close the IMAP connection.
+     */
+    public function __destruct() {
+        try {
+            if ($this->client instanceof Client && $this->client->isConnected()) {
+                $this->client->disconnect();
+            }
+        } catch (Throwable $e) {
+            // Nothing useful to do while tearing down.
+        }
     }
 }

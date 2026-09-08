@@ -52,7 +52,13 @@
         </div>
         {% endif %}
         <div class="email-body" style="page-break-before: avoid; break-before: avoid;">
-            {{ htmlBody|raw }}
+            {# Un message en texte brut n'a pas de partie HTML : sans ce repli
+               le PDF ne contiendrait que les en-têtes. #}
+            {% if htmlBody is not empty %}
+                {{ htmlBody|raw }}
+            {% else %}
+                {{ body|nl2br }}
+            {% endif %}
         </div>
         
     </div>

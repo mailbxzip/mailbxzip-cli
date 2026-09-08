@@ -4,6 +4,8 @@ namespace Mailbxzip\Cli;
 
 use Exception;
 use RuntimeException;
+use Mailbxzip\Cli\Contract\InputHandlerInterface;
+use Mailbxzip\Cli\Contract\OutputHandlerInterface;
 
 /**
  * Class Mailbox
@@ -45,14 +47,19 @@ class Mailbox {
 
         // Load the configuration from the INI file
         $this->config = parse_ini_file($this->configFile);
-        $this->config['working_dir'] = $this->workingDir;
-        // Retrieve the class names from the configuration
-        $inputClass = $this->config['in'];
-        $outputClass = $this->config['out'];
 
-        // Initialize the inputHandler and outputHandler objects using the provided class names
-        $inputNamespace = "Mailbxzip\\Cli\\In\\" . $inputClass;
-        $outputNamespace = "Mailbxzip\\Cli\\Out\\" . $outputClass;
+        if ($this->config === false) {
+            throw new RuntimeException("The configuration file '".$this->configFile."' could not be parsed.");
+        }
+
+        $this->config['working_dir'] = $this->workingDir;
+
+        // Resolve the connectors named by the 'in' and 'out' configuration
+        // keys, and check they honour their contract before going any further:
+        // a connector that does not is far cheaper to catch here than after
+        // three thousand messages.
+        $inputNamespace = $this->resolveHandler('in', 'In', InputHandlerInterface::class);
+        $outputNamespace = $this->resolveHandler('out', 'Out', OutputHandlerInterface::class);
 
         $this->inputHandler = new $inputNamespace($this->config, $this);
         $this->outputHandler = new $outputNamespace($this->config, $this);
@@ -62,6 +69,63 @@ class Mailbox {
 
         // Create the necessary directories
         $this->createDirectories();
+    }
+
+    /**
+     * Resolve a connector class from a configuration key.
+     *
+     * @param string $configKey  Configuration entry holding the connector name ('in' or 'out').
+     * @param string $subPackage Sub-namespace to look into ('In' or 'Out').
+     * @param string $interface  Interface the connector must implement.
+     * @return string The fully qualified class name.
+     * @throws RuntimeException If the entry is missing, unknown, or off contract.
+     */
+    private function resolveHandler($configKey, $subPackage, $interface) {
+        if (empty($this->config[$configKey])) {
+            throw new RuntimeException(
+                "The configuration file '".$this->configFile."' has no '$configKey' entry. "
+                ."Available: ".implode(', ', $this->availableHandlers($subPackage)).'.'
+            );
+        }
+
+        $class = "Mailbxzip\\Cli\\".$subPackage."\\".$this->config[$configKey];
+
+        if (!class_exists($class)) {
+            throw new RuntimeException(
+                "Unknown $configKey connector '".$this->config[$configKey]."'. "
+                ."Available: ".implode(', ', $this->availableHandlers($subPackage)).'.'
+            );
+        }
+
+        if (!is_subclass_of($class, $interface)) {
+            throw new RuntimeException("The $configKey connector '$class' does not implement $interface.");
+        }
+
+        return $class;
+    }
+
+    /**
+     * List the connector names available in a sub-namespace.
+     *
+     * @param string $subPackage 'In' or 'Out'.
+     * @return array<string> Sorted connector names.
+     */
+    private function availableHandlers($subPackage) {
+        $names = [];
+        $directory = __DIR__.'/'.$subPackage;
+
+        foreach (glob($directory.'/*.php') ?: [] as $file) {
+            $name = basename($file, '.php');
+            $class = "Mailbxzip\\Cli\\".$subPackage."\\".$name;
+
+            if (class_exists($class) && !(new \ReflectionClass($class))->isAbstract()) {
+                $names[] = $name;
+            }
+        }
+
+        sort($names);
+
+        return $names;
     }
 
     /**
@@ -139,6 +203,9 @@ class Mailbox {
         // Initialize the counter for the total number of imported emails
         $importedEmails = 0;
 
+        // Count the messages that could not be persisted at all
+        $failedEmails = 0;
+
         // JSON file path in the archives folder
         $jsonFilePath = $this->config['emailArchivePath'] . '/saved_emails.json';
 
@@ -164,15 +231,27 @@ class Mailbox {
                     $remainingTime = $this->estimateRemainingTime($importedEmails, $totalEmails);
                     $this->log("saving e-mail ($emailId) $key/" . count($emailIds) . " [" . $this->updateProgress($importedEmails, $totalEmails) . "%] - Estimated remaining time: $remainingTime");
                     $this->updateState('get email ' . $emailId);
-                    $eml = $this->inputHandler->getEmail($emailId, $folder);
-                    $this->outputHandler->saveEmails($eml);
+
+                    try {
+                        $eml = $this->inputHandler->getEmail($emailId, $folder);
+                        $this->outputHandler->saveEmails($eml);
+                        $this->saveSource($eml);
+                    } catch (\Throwable $e) {
+                        // Nothing was persisted for this message. Keep its id
+                        // out of the resume index so a later run retries it,
+                        // and carry on: one unreadable e-mail must not end the
+                        // export of the whole mailbox.
+                        $failedEmails++;
+                        $this->log("e-mail ($emailId) in folder $folder could not be saved, it will be retried on the next run: ".$e->getMessage(), 'ERROR');
+                        $importedEmails++;
+                        continue;
+                    }
 
                     // Add the email ID to the list of saved emails in the corresponding folder
                     $savedEmails[$folder][] = $emailId;
 
                     // Save the list of saved emails in the JSON file after each save
                     file_put_contents($jsonFilePath, json_encode($savedEmails, JSON_PRETTY_PRINT));
-                    $this->saveSource($eml);
                 } else {
                     $this->log("e-mail ($emailId) already saved in folder $folder, skipping");
                 }
@@ -184,6 +263,10 @@ class Mailbox {
         $this->updateProgress($importedEmails, $totalEmails);
         // Log the total number of imported emails
         $this->log("Total emails imported: $importedEmails");
+
+        if ($failedEmails > 0) {
+            $this->log("$failedEmails e-mail(s) could not be saved and will be retried on the next run", 'ERROR');
+        }
     }
 
     /**
@@ -535,7 +618,15 @@ class Mailbox {
      * @return string The save path.
      */
     private function emlSavePath($eml) {
-        return $this->sourcePath($eml).$eml->filename().'.eml';
+        $path = $this->sourcePath($eml).$eml->filename().'.eml';
+
+        // Same collision risk as the output connectors: two messages of a
+        // folder can share a filename once truncated and sanitised.
+        if (file_exists($path)) {
+            $path = $this->sourcePath($eml).$eml->filename().'-'.$eml->getUid().'.eml';
+        }
+
+        return $path;
     }
 
     /**
@@ -555,17 +646,21 @@ class Mailbox {
      * @param bool $force Force saving the source.
      * @throws RuntimeException If the directory cannot be created.
      */
-    private function saveSource($eml, $force = false) {
+    public function saveSource($eml, $force = false) {
         // Logic to save the email source
         // (Add the specific logic to save the email source here)
         // Check if the 'wSource' entry exists in the configuration and is equal to 1
         if ((isset($this->getConfig()['wSource']) && $this->getConfig()['wSource'] == 1 && $this->isConfigEntryAllowed('wSource')) || $force) {
             if (!is_dir($this->sourcePath($eml))) {
                 if (!mkdir($this->sourcePath($eml), 0777, true)) {
-                    throw new RuntimeException("Unable to create the directory: ".$this->sourcePath());
+                    throw new RuntimeException("Unable to create the directory: ".$this->sourcePath($eml));
                 }
             }
-            file_put_contents($this->emlSavePath($eml), $eml->getContent());
+            $path = $this->emlSavePath($eml);
+
+            if (file_put_contents($path, $eml->getContent()) === false) {
+                throw new RuntimeException("Unable to write the source file: $path");
+            }
         }
     }
 }

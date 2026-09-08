@@ -136,7 +136,6 @@ class ConfigCommand extends Command
                     
                     $className = pathinfo($file, PATHINFO_FILENAME);
                     $fullClassName = "Mailbxzip\\Cli\\In\\" . $className;
-                    var_dump($fullClassName);
                     if (class_exists($fullClassName)) {
                         
                         $help .= $this->generateHelpFromClass($fullClassName);
@@ -155,7 +154,6 @@ class ConfigCommand extends Command
                     
                     $className = pathinfo($file, PATHINFO_FILENAME);
                     $fullClassName = "Mailbxzip\\Cli\\Out\\" . $className;
-                    var_dump($fullClassName);
                     if (class_exists($fullClassName)) {
                         
                         $help .= $this->generateHelpFromClass($fullClassName);

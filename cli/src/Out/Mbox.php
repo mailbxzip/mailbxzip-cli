@@ -2,16 +2,21 @@
 
 namespace Mailbxzip\Cli\Out;
 
-use Exception;
-use RuntimeException;
+use Throwable;
 
 /**
  * Class Mbox
  *
- * This class handles the export of emails to PDF format.
- * It includes methods for setting folders, saving emails.
+ * This class handles the export of emails to the mbox format: one mailbox
+ * file per folder, messages appended one after the other.
+ *
+ * The mboxrd variant is produced: each message is introduced by a "From "
+ * envelope line, and any line of the message already starting with "From "
+ * -- or ">From ", ">>From "... -- gets one more ">" so it cannot be mistaken
+ * for a separator. Without that, a reader splits messages in the middle and
+ * the archive is unusable.
  */
-class Mbox {
+class Mbox extends AbstractOutput {
     public const HELP = 'Export e-mails to Mbox format';
 
     public const MINIMAL_CONFIG_VAR = [
@@ -20,98 +25,81 @@ class Mbox {
 
     public const CAN_DELETE = true;
 
-    private $config;
-    private $mailbox;
-
     /**
-     * Pdf constructor.
-     *
-     * @param array $config Configuration array.
-     * @param \Mailbxzip\Cli\Mailbox|null $mailbox Mailbox instance.
+     * Append one email to the mbox file of its folder.
      */
-    public function __construct($config, \Mailbxzip\Cli\Mailbox $mailbox = null) {
-        // Load the configuration
-        $this->config = $config;
-        $this->mailbox = $mailbox;
-    }
-
-    /**
-     * Get the configuration.
-     *
-     * @return array The configuration array.
-     */
-    public function getConfig() {
-        return (!is_null($this->mailbox)) ? $this->mailbox->getConfig() : $this->config;
-    }
-
-    /**
-     * Set the folders for email archiving.
-     *
-     * @param array $folders Array of folders to set.
-     * @throws RuntimeException If unable to create a folder.
-     */
-    public function setFolders($folders) {
-        // Check if the 'emailArchivePath' key exists in the configuration
-        if (!isset($this->getConfig()['emailArchivePath'])) {
-            // Create the 'emailArchivePath' key with a default path
-            $this->getConfig()['emailArchivePath'] = '/default/path/to/archives';
-        }
-
-        $basePath = $this->getConfig()['emailArchivePath'];
-
-        // Iterate over each key in the $folders array
-        foreach ($folders as $folder => $nb) {
-            // Build the full path of the folder
-            $folderPath = $basePath . DIRECTORY_SEPARATOR . $folder;
-
-            // Create the folder if it does not already exist
-            if (!is_dir($folderPath)) {
-                if (!mkdir($folderPath, 0777, true)) {
-                    throw new RuntimeException("Unable to create folder: $folderPath");
-                }
-            }
-        }
-    }
-
-    /**
-     * Save emails to PDF format.
-     *
-     * @param object $eml Email object.
-     */
-    public function saveEmails($eml) {
-
+    public function saveEmails(\Mailbxzip\Cli\Eml $eml): void {
         try {
-            file_put_contents($this->savePath($eml), $eml->getContent()."\n", FILE_APPEND);
-        } catch (Exception $e) {
-            // If html2pdf fails, save the source
-            $this->mailbox->saveSource($eml, true);
-            // Optionally, you can log the error
-            $this->mailbox->log('Unable to save Eml file', 'ERROR');
-            $this->mailbox->log($e->getMessage(), 'ERROR');
+            $this->write($this->savePath($eml), $this->toMboxEntry($eml), FILE_APPEND);
+        } catch (Throwable $e) {
+            $this->fallback($eml, $e, 'Unable to save Mbox file');
         }
     }
 
     /**
-     * Get the PDF save path for an email.
+     * Get the mbox save path for an email.
+     */
+    private function savePath(\Mailbxzip\Cli\Eml $eml): string {
+        return $this->archivePath().'/'.$eml->getFolder().'/email.mbox';
+    }
+
+    /**
+     * Turn a message into a complete mbox entry.
      *
-     * @param object $eml Email object.
-     * @return string The PDF save path.
+     * The message bytes are kept verbatim apart from the ">From " quoting:
+     * this is an archiving tool, the source must stay faithful.
      */
-    private function savePath($eml) {
-        return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/email.mbox';
+    private function toMboxEntry(\Mailbxzip\Cli\Eml $eml): string {
+        $content = preg_replace('/^(>*From )/m', '>$1', $eml->getContent());
+
+        // A reader expects the entry to end on a blank line.
+        if (substr($content, -1) !== "\n") {
+            $content .= "\n";
+        }
+
+        return $this->envelopeLine($eml)."\n".$content."\n";
     }
 
     /**
-     * Pre-function hook.
+     * Build the "From " separator line: sender then asctime date.
      */
-    public function preFunc() {
-        //echo 'start';
+    private function envelopeLine(\Mailbxzip\Cli\Eml $eml): string {
+        $data = $eml->get();
+
+        return 'From '.$this->envelopeSender($data['from'] ?? '').' '.$this->envelopeDate($data['date'] ?? '');
     }
 
     /**
-     * Post-function hook.
+     * Extract a bare address, with the conventional fallback of a message
+     * whose origin is unknown.
      */
-    public function postFunc() {
-        //echo 'end';
+    private function envelopeSender($from): string {
+        if (preg_match('/<(.+?)>/', (string) $from, $matches)) {
+            $from = $matches[1];
+        }
+
+        $from = trim((string) $from);
+
+        // No whitespace allowed: it would break the separator line.
+        return ($from === '') ? 'MAILER-DAEMON' : preg_replace('/\s+/', '', $from);
+    }
+
+    /**
+     * Format the date the way mbox expects it, falling back to the current
+     * time when the header is missing or unreadable.
+     */
+    private function envelopeDate($date): string {
+        try {
+            $parsed = new \DateTime((string) $date);
+        } catch (Throwable $e) {
+            $parsed = new \DateTime();
+        }
+
+        if (trim((string) $date) === '') {
+            $parsed = new \DateTime();
+        }
+
+        // "Mon Jan  8 22:41:44 2024": the day is space padded.
+        return $parsed->format('D M').' '.str_pad($parsed->format('j'), 2, ' ', STR_PAD_LEFT).$parsed->format(' H:i:s Y');
     }
 }
