@@ -26,6 +26,7 @@ compressée en `~/.config/mailbxzip/archives/<nom-de-la-config>.zip`.
 | Fichier | Ce qu'il fait | Modifie la boîte ? |
 |---|---|---|
 | [`essai-hors-ligne.ini`](essai-hors-ligne.ini) | Exporte un jeu de messages fictifs en HTML. Ni serveur ni compte requis. | Non |
+| [`imap-simple.ini`](imap-simple.ini) | **Point de départ pour une vraie boîte** : IMAP vers `.eml` ou HTML, avec ou sans suppression. | Non par défaut |
 | [`archive-2-ans-html.ini`](archive-2-ans-html.ini) | Archive en HTML les messages de **plus de deux ans**. | **Non** |
 | [`archive-2-ans-html-corbeille.ini`](archive-2-ans-html-corbeille.ini) | Idem, **puis déplace les messages archivés dans la corbeille**. | Oui, réversible |
 | [`archive-2-ans-html-purge.ini`](archive-2-ans-html-purge.ini) | Idem, **puis efface définitivement** les messages archivés. | **Oui, définitivement** |
@@ -38,6 +39,21 @@ Le point de départ conseillé. Le connecteur d'entrée `Test` fournit une petit
 boîte fictive — dossiers imbriqués, accents, pièces jointes, message sans date —
 ce qui permet de voir à quoi ressemble une archive avant de brancher un vrai
 compte.
+
+### `imap-simple.ini`
+
+Le socle pour une vraie boîte : la configuration IMAP minimale, sans fenêtre
+de dates ni suppression. Les variantes sont présentes en commentaire, il
+suffit de décommenter :
+
+| Objectif | À décommenter |
+|---|---|
+| Archive navigable au navigateur | `out = Html` (au lieu de `out = Eml`) |
+| Messages archivés vers la corbeille | `delete = 1` et `trash = 1` |
+| Messages archivés effacés définitivement | `delete = 1` |
+| Ne prendre que les messages anciens | `before = "-2 years"` |
+
+Les autres exemples de ce dossier sont des variantes préréglées de celui-ci.
 
 ### `archive-2-ans-html.ini`
 
