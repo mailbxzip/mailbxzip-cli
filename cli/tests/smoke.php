@@ -592,6 +592,50 @@ if (!$spawned && !@stream_socket_client("tcp://127.0.0.1:$imapPort", $errno, $er
         proc_close($trashProcess);
     }
 
+    // --- a folder large enough to overshoot the server's line limit ---------
+    $bulkPort = 0;
+    $bulkProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+    if ($bulkProbe) {
+        $name = stream_socket_get_name($bulkProbe, false);
+        $bulkPort = (int) substr($name, strrpos($name, ':') + 1);
+        fclose($bulkProbe);
+    }
+
+    $bulkProcess = @proc_open(
+        'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $bulkPort --bulk",
+        [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+        $bulkPipes
+    );
+
+    if (is_resource($bulkProcess)) {
+        stream_set_timeout($bulkPipes[1], 5);
+        fgets($bulkPipes[1]);
+
+        echo "\nLarge folders — uid sets batched below the line limit\n";
+
+        $connect = function (array $extra = []) use ($bulkPort) {
+            return new \Mailbxzip\Cli\In\Imap([
+                'address' => 'test@mailbxzip.com',
+                'host' => '127.0.0.1', 'port' => $bulkPort, 'encryption' => 'none',
+                'username' => 'u', 'password' => 'p',
+            ] + $extra);
+        };
+
+        $uids = $connect()->getEmails()['INBOX.Bulk'] ?? [];
+        check('bulk folder large enough to matter', count($uids) === 2000 && strlen(implode(',', $uids)) > 8192);
+
+        $removed = $connect(['trash' => 1])->deleteEmails('INBOX.Bulk', $uids);
+        check('every message of a large folder is moved', count($removed) === 2000);
+
+        $after = $connect()->getEmails();
+        check('large folder emptied', count($after['INBOX.Bulk'] ?? []) === 0);
+        check('large folder landed in the trash', count($after['INBOX.Trash'] ?? []) === 2000);
+
+        proc_terminate($bulkProcess);
+        proc_close($bulkProcess);
+    }
+
     // Let the connectors close their sockets while the server is still up,
     // otherwise the teardown logs broken pipe notices.
     unset($imapMailbox, $filteredMailbox);
@@ -643,12 +687,42 @@ fails('source unable to delete is refused', function () use ($dir) {
     (new Mailbox(writeConfig($dir, 'Test', 'Eml', ['delete' => 1]), $dir))->start();
 }, 'cannot remove messages from its source');
 
+// Asking for the trash is asking for the messages to leave: no delete key
+// should be needed, and the guards must still apply.
+fails('trash alone triggers the guards', function () use ($dir) {
+    (new Mailbox(writeConfig($dir, 'Test', 'Eml', ['trash' => 1]), $dir))->start();
+}, "'trash' was asked for");
+
 check('nothing deleted without the delete key', (function () use ($dir) {
     $config = writeConfig($dir, 'Test', 'Eml');
     (new Mailbox($config, $dir))->start();
 
     return !is_file($dir.'/archives/test@mailbxzip.com/purged_emails.json');
 })());
+
+// ------------------------------------------------------- uid sequence sets ---
+echo "\nSequence sets — large uid lists fit in a command\n";
+
+$chunks = ['Mailbxzip\\Cli\\In\\Imap', 'sequenceChunks'];
+$render = ['Mailbxzip\\Cli\\In\\Imap', 'renderSet'];
+
+// The shape of a full-folder archive: 4568 uids became a 21 kB command line,
+// which no server accepts.
+$consecutive = $chunks(range(1, 4568));
+check('consecutive uids collapse to one range', count($consecutive) === 1 && $render($consecutive[0]) === '1:4568');
+
+check('isolated uids are listed', $render($chunks([361, 464, 3956])[0]) === '361,464,3956');
+check('mixed runs and gaps', $render($chunks([1, 2, 3, 10, 20, 21])[0]) === '1:3,10,20:21');
+check('order and duplicates do not matter', $render($chunks([3, 1, 2, 2])[0]) === '1:3');
+check('empty list yields no command', $chunks([]) === []);
+
+// Worst case: nothing consecutive, so nothing collapses. Every command must
+// still stay under the cap.
+$fragmented = $chunks(range(1, 4000, 2));
+$longest = max(array_map(fn ($c) => strlen($render($c)), $fragmented));
+check('fragmented lists are split into batches', count($fragmented) > 1);
+check('no batch exceeds the cap', $longest <= 900);
+check('batching loses no uid', array_sum(array_map('count', array_map(fn ($c) => array_merge(...array_map(fn ($r) => range($r[0], $r[1]), $c)), $fragmented))) === 2000);
 
 // ------------------------------------------------------------------ done ----
 foreach ($cleanup as $dir) {

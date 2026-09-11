@@ -51,6 +51,28 @@ FLAGS = {
     "INBOX.Trash": "\\HasNoChildren \\Trash",
 }
 
+# A real server caps the length of a command line, commonly at 8 kB, and
+# simply drops the connection when it is exceeded rather than answering. The
+# limit is enforced here so the batching of large uid sets is actually tested.
+LINE_LIMIT = 8192
+
+
+def add_bulk_folder(count=2000):
+    """Add a folder big enough that listing its uids one by one overshoots
+    LINE_LIMIT: 2000 four-digit uids make a set of roughly 10 kB.
+
+    Opt-in through --bulk, so the ordinary scenarios stay small and quick.
+    """
+    MAILBOX["INBOX.Bulk"] = {
+        uid: message(
+            "bulk@example.org",
+            f"Message {uid}",
+            "Mon, 8 Jan 2024 10:00:00 +0100",
+            f"Corps du message {uid}.",
+        )
+        for uid in range(1000, 1000 + count)
+    }
+
 
 class Handler(socketserver.StreamRequestHandler):
 
@@ -66,6 +88,11 @@ class Handler(socketserver.StreamRequestHandler):
         while True:
             raw = self.rfile.readline()
             if not raw:
+                return
+
+            if len(raw) > LINE_LIMIT:
+                # No answer, no error: the connection just goes away, which is
+                # what leaves a client staring at an empty response.
                 return
 
             parts = raw.decode(errors="replace").strip().split(" ")
@@ -224,6 +251,9 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 1143
+
+    if "--bulk" in sys.argv:
+        add_bulk_folder()
     server = Server(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("READY", flush=True)

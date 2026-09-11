@@ -28,9 +28,14 @@ interface DeletableInputInterface {
      * An id that no longer exists must not be treated as an error: a previous
      * run may have removed it already.
      *
+     * The return value carries which messages actually went, not merely how
+     * many: the mailbox records exactly those as purged, so anything a
+     * partial failure left behind is offered again on the next run instead of
+     * being written off.
+     *
      * @param string $folder Folder key, as returned by getEmails().
      * @param array<int|string> $ids Identifiers to remove.
-     * @return int How many messages were actually removed.
+     * @return array<int|string> The identifiers actually removed, as given.
      */
-    public function deleteEmails(string $folder, array $ids): int;
+    public function deleteEmails(string $folder, array $ids): array;
 }

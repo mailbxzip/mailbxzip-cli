@@ -88,7 +88,7 @@ password   = "…"
 | Fichiers `.eml` réimportables | `out = Eml` |
 | Archive navigable au navigateur | `out = Html` |
 | …sans toucher à la boîte | *(rien — c'est le comportement par défaut)* |
-| …en envoyant les messages archivés à la corbeille | `delete = 1` et `trash = 1` |
+| …en envoyant les messages archivés à la corbeille | `trash = 1` |
 | …en les effaçant définitivement | `delete = 1` |
 
 [`examples/imap-simple.ini`](examples/imap-simple.ini) contient les quatre,
@@ -135,8 +135,8 @@ Plus `username` et `password` dans les deux cas.
 |---|---|
 | `since` | N'archiver que les messages envoyés **à partir de** cette date, incluse. |
 | `before` | N'archiver que les messages envoyés **strictement avant** cette date. Accepte le relatif : `-2 years`. |
-| `delete` | `1` supprime de la source les messages archivés. **Destructif.** |
-| `trash` | Avec `delete` : `1` déplace vers la corbeille au lieu d'effacer, ou nommez le dossier. |
+| `delete` | `1` **efface** de la source les messages archivés. **Destructif.** |
+| `trash` | `1` **déplace** les messages archivés vers la corbeille, ou nommez le dossier. Se suffit à lui-même. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `debugHtml` | `1` conserve le HTML intermédiaire à côté de chaque PDF. |
 | `archives_dir` / `tmp_dir` | Déplacent les répertoires de travail. |
@@ -202,13 +202,19 @@ celle qui nomme les fichiers.
 > avant de l'activer.
 
 ```ini
-delete = 1
-trash  = 1      ; vers la corbeille — recommandé pour une première purge
+trash = 1       ; vers la corbeille — recommandé pour une première purge
 ```
+
+```ini
+delete = 1      ; effacement définitif, sans filet
+```
+
+`trash` se suffit à lui-même : demander la corbeille, c'est déjà demander que
+les messages quittent leurs dossiers.
 
 Quatre conditions doivent être réunies pour qu'un message disparaisse :
 
-1. `delete = 1` explicitement — absent par défaut ;
+1. `delete = 1` ou `trash` explicitement — les deux absents par défaut ;
 2. la source sait supprimer ;
 3. le format de sortie se porte garant de son archive — un essai à blanc, par
    exemple, ne l'autorise pas ;

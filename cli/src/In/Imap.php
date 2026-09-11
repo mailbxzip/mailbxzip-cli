@@ -36,6 +36,13 @@ class Imap extends AbstractInput implements DeletableInputInterface {
     /** This source can remove messages once they are archived. */
     public const CAN_DELETE = true;
 
+    /**
+     * Longest sequence set sent in one command, in bytes. Well under the
+     * usual 8 kB line limit, since the rest of the command and the mailbox
+     * name count too, and some servers cap lower.
+     */
+    private const MAX_SET_LENGTH = 900;
+
     public const MINIMAL_CONFIG_VAR = [
         'in' => 'Imap',
         'host' => 'imap server hostname, e.g. ssl0.ovh.net',
@@ -270,9 +277,9 @@ class Imap extends AbstractInput implements DeletableInputInterface {
      *
      * @param array<int|string> $ids
      */
-    public function deleteEmails(string $folder, array $ids): int {
+    public function deleteEmails(string $folder, array $ids): array {
         if ($ids === []) {
-            return 0;
+            return [];
         }
 
         $trash = $this->trashSetting();
@@ -280,46 +287,181 @@ class Imap extends AbstractInput implements DeletableInputInterface {
         // cannot be found, the export must stop rather than quietly fall back
         // to erasing the messages.
         $target = $trash['enabled'] ? $this->resolveTrashFolder() : null;
+        $moving = !is_null($target) && $target !== $folder;
+
+        if (!is_null($target) && !$moving) {
+            $this->log("folder $folder is the trash itself, its archived messages are erased");
+        }
 
         $connection = $this->client->getConnection();
         $connection->selectFolder($folder);
 
-        if (!is_null($target) && $target !== $folder) {
-            $copied = $connection->copyManyMessages(array_map('intval', $ids), $target, Protocol::ST_UID);
-
-            // Never expunge what could not be copied: that would be the very
-            // data loss the trash is meant to prevent.
-            if (!$copied->successful()) {
-                throw new RuntimeException(
-                    "Unable to copy ".count($ids)." e-mail(s) of folder $folder to the trash '$target'; nothing was deleted."
-                );
-            }
-
-            $this->log(count($ids)." e-mail(s) of folder $folder moved to '$target'");
-        } elseif (!is_null($target)) {
-            $this->log("folder $folder is the trash itself, its archived messages are erased");
+        // Keep the identifiers as the mailbox knows them, so the caller can
+        // tell exactly which ones went.
+        $original = [];
+        foreach ($ids as $id) {
+            $original[(int) $id] = $id;
         }
 
-        $flagged = 0;
+        $removed = [];
+        $expunge = false;
 
-        foreach ($ids as $id) {
-            $response = $connection->store(['\\Deleted'], (int) $id, (int) $id, '+FLAGS', true, Protocol::ST_UID);
+        foreach (self::sequenceChunks(array_keys($original)) as $ranges) {
+            $set = self::renderSet($ranges);
 
-            if ($response->successful()) {
-                $flagged++;
+            if ($moving && !$this->copyBatch($connection, $set, $folder, $target)) {
+                // Never flag what could not be copied: that would be the very
+                // data loss the trash is meant to prevent. The batch stays and
+                // is retried on the next run.
                 continue;
             }
 
-            // A message already gone is not a failure: a previous run may
-            // have purged it.
-            $this->log("e-mail $id of folder $folder could not be flagged for deletion, it may already be gone", 'WARNING');
+            if (!$this->flagBatch($connection, $ranges, $folder)) {
+                continue;
+            }
+
+            $expunge = true;
+
+            foreach (self::expandRanges($ranges) as $id) {
+                $removed[] = $original[$id];
+            }
         }
 
-        if ($flagged > 0) {
+        if ($expunge) {
             $connection->expunge();
         }
 
-        return $flagged;
+        if ($moving && $removed !== []) {
+            $this->log(count($removed)." e-mail(s) of folder $folder moved to '$target'");
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Copy one batch to the trash.
+     *
+     * @return bool Whether the batch may now be flagged for deletion.
+     */
+    private function copyBatch($connection, string $set, string $folder, string $target): bool {
+        $copied = $connection->copyManyMessages([$set], $target, Protocol::ST_UID);
+
+        if ($copied->successful()) {
+            return true;
+        }
+
+        $this->log("e-mails $set of folder $folder could not be copied to the trash '$target', they stay where they are", 'ERROR');
+
+        return false;
+    }
+
+    /**
+     * Flag one batch as deleted, range by range.
+     *
+     * @param array<int,array{0:int,1:int}> $ranges
+     */
+    private function flagBatch($connection, array $ranges, string $folder): bool {
+        foreach ($ranges as $range) {
+            $response = $connection->store(['\\Deleted'], $range[0], $range[1], '+FLAGS', true, Protocol::ST_UID);
+
+            if (!$response->successful()) {
+                $this->log(
+                    'e-mails '.self::renderRange($range)." of folder $folder could not be flagged for deletion",
+                    'ERROR'
+                );
+
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * Turn a list of uids into IMAP sequence sets, small enough to send.
+     *
+     * Two problems are solved at once. Consecutive uids collapse into ranges,
+     * which is the usual shape of a full-folder archive: 4568 messages become
+     * "1:4568", six bytes instead of twenty-one kilobytes. And whatever
+     * remains is split into batches, because an IMAP command line is capped
+     * -- commonly at 8 kB, sometimes less. Overshooting it does not return an
+     * error, it gets the connection dropped, and every later command on that
+     * connection fails too.
+     *
+     * @param array<int> $ids
+     * @return array<int,array<int,array{0:int,1:int}>> Batches of ranges.
+     */
+    public static function sequenceChunks(array $ids, int $maxLength = self::MAX_SET_LENGTH): array {
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        sort($ids);
+
+        $ranges = [];
+
+        foreach ($ids as $id) {
+            $last = $ranges === [] ? null : count($ranges) - 1;
+
+            if (!is_null($last) && $id === $ranges[$last][1] + 1) {
+                $ranges[$last][1] = $id;
+                continue;
+            }
+
+            $ranges[] = [$id, $id];
+        }
+
+        $chunks = [];
+        $current = [];
+        $length = 0;
+
+        foreach ($ranges as $range) {
+            $piece = strlen(self::renderRange($range));
+
+            if ($current !== [] && $length + 1 + $piece > $maxLength) {
+                $chunks[] = $current;
+                $current = [];
+                $length = 0;
+            }
+
+            $length += ($current === [] ? 0 : 1) + $piece;
+            $current[] = $range;
+        }
+
+        if ($current !== []) {
+            $chunks[] = $current;
+        }
+
+        return $chunks;
+    }
+
+    /**
+     * Render a batch of ranges as an IMAP sequence set.
+     *
+     * @param array<int,array{0:int,1:int}> $ranges
+     */
+    public static function renderSet(array $ranges): string {
+        return implode(',', array_map([self::class, 'renderRange'], $ranges));
+    }
+
+    /**
+     * @param array{0:int,1:int} $range
+     */
+    private static function renderRange(array $range): string {
+        return $range[0] === $range[1] ? (string) $range[0] : $range[0].':'.$range[1];
+    }
+
+    /**
+     * @param array<int,array{0:int,1:int}> $ranges
+     * @return array<int,int>
+     */
+    private static function expandRanges(array $ranges): array {
+        $ids = [];
+
+        foreach ($ranges as $range) {
+            for ($id = $range[0]; $id <= $range[1]; $id++) {
+                $ids[] = $id;
+            }
+        }
+
+        return $ids;
     }
 
     /**
@@ -383,7 +525,13 @@ class Imap extends AbstractInput implements DeletableInputInterface {
      * @param array<string,array> $folders
      */
     private function folderNamedAsTrash(array $folders): ?string {
-        $known = ['trash', 'corbeille', 'deleted items', 'deleted messages', 'papierkorb', 'prullenbak', 'cestino', 'papelera', 'kosz', 'skrapan'];
+        $known = [
+            'trash', 'deleted', 'deleted items', 'deleted messages',
+            'corbeille', 'éléments supprimés', 'elements supprimes',
+            'messages supprimés', 'messages supprimes',
+            'papierkorb', 'gelöschte elemente', 'prullenbak', 'cestino',
+            'papelera', 'elementos eliminados', 'kosz', 'skrapan', 'lixeira',
+        ];
 
         foreach ($folders as $path => $attributes) {
             $leaf = $this->lastSegment((string) $path, (string) ($attributes['delimiter'] ?? '.'));

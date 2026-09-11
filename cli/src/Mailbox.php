@@ -27,7 +27,7 @@ class Mailbox {
 
     public const CONFIG_VAR = [
         'wSource' => '(1|0) store eml source in separate "source" folder',
-        'delete' => '(1|0) DESTRUCTIVE: remove the archived messages from the source, once the zip exists',
+        'delete' => '(1|0) DESTRUCTIVE: erase the archived messages from the source, once the zip exists. Not needed when trash is set',
     ];
 
     /**
@@ -325,8 +325,22 @@ class Mailbox {
                 continue;
             }
 
-            $total += $removed;
-            $purged[$folder] = array_values(array_unique(array_merge($purged[$folder] ?? [], $pending)));
+            // Record exactly what went, never the whole batch: a message a
+            // partial failure left behind must be offered again next run
+            // rather than written off as done.
+            if (count($removed) < count($pending)) {
+                $this->log(
+                    (count($pending) - count($removed))." e-mail(s) of folder $folder could not be removed and will be retried on the next run",
+                    'ERROR'
+                );
+            }
+
+            if ($removed === []) {
+                continue;
+            }
+
+            $total += count($removed);
+            $purged[$folder] = array_values(array_unique(array_merge($purged[$folder] ?? [], $removed)));
             file_put_contents($purgedFilePath, json_encode($purged, JSON_PRETTY_PRINT));
         }
 
@@ -337,7 +351,15 @@ class Mailbox {
      * Whether the configuration asks for the source to be emptied.
      */
     private function deletionRequested() {
-        return isset($this->config['delete']) && (string) $this->config['delete'] === '1';
+        if (isset($this->config['delete']) && (string) $this->config['delete'] === '1') {
+            return true;
+        }
+
+        // Asking for the archived messages to go to the trash is already
+        // asking for them to leave their folder: 'trash' stands on its own.
+        $trash = trim((string) ($this->config['trash'] ?? ''));
+
+        return $trash !== '' && $trash !== '0';
     }
 
     /**
@@ -348,20 +370,30 @@ class Mailbox {
     private function assertDeletionAllowed() {
         $input = get_class($this->inputHandler);
         $output = get_class($this->outputHandler);
+        $asked = $this->trashRequested() ? "'trash'" : "'delete = 1'";
 
         if (!$this->inputHandler instanceof DeletableInputInterface) {
-            throw new RuntimeException("'delete = 1' was asked for, but the input connector $input cannot remove messages from its source.");
+            throw new RuntimeException("$asked was asked for, but the input connector $input cannot remove messages from its source.");
         }
 
         if (!defined("$input::CAN_DELETE") || $input::CAN_DELETE !== true) {
-            throw new RuntimeException("'delete = 1' was asked for, but the input connector $input does not allow it.");
+            throw new RuntimeException("$asked was asked for, but the input connector $input does not allow it.");
         }
 
         if (!defined("$output::CAN_DELETE") || $output::CAN_DELETE !== true) {
-            throw new RuntimeException("'delete = 1' was asked for, but the output connector $output does not vouch for its archive: refusing to empty the source.");
+            throw new RuntimeException("$asked was asked for, but the output connector $output does not vouch for its archive: refusing to empty the source.");
         }
 
         $this->isConfigEntryAllowed('delete');
+    }
+
+    /**
+     * Whether the messages are to be moved to the trash rather than erased.
+     */
+    private function trashRequested() {
+        $trash = trim((string) ($this->config['trash'] ?? ''));
+
+        return $trash !== '' && $trash !== '0';
     }
 
     /**

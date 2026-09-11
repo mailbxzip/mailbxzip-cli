@@ -174,9 +174,9 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface {
      *
      * @param array<int|string> $ids
      */
-    public function deleteEmails(string $folder, array $ids): int {
+    public function deleteEmails(string $folder, array $ids): array {
         if ($ids === []) {
-            return 0;
+            return [];
         }
 
         $trash = $this->trashSetting();
@@ -184,7 +184,7 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface {
         $moving = !is_null($target) && $target !== $folder;
 
         imap_reopen($this->imap, $folder);
-        $flagged = 0;
+        $removed = [];
 
         foreach ($ids as $id) {
             // imap_mail_move copies then flags, so a failed move never
@@ -194,7 +194,7 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface {
                 : imap_delete($this->imap, (string) $id, FT_UID);
 
             if ($done) {
-                $flagged++;
+                $removed[] = $id;
                 continue;
             }
 
@@ -206,15 +206,15 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface {
             );
         }
 
-        if ($flagged > 0) {
+        if ($removed !== []) {
             imap_expunge($this->imap);
         }
 
-        if ($moving && $flagged > 0) {
-            $this->log("$flagged e-mail(s) of folder $folder moved to '$target'");
+        if ($moving && $removed !== []) {
+            $this->log(count($removed)." e-mail(s) of folder $folder moved to '$target'");
         }
 
-        return $flagged;
+        return $removed;
     }
 
     /**

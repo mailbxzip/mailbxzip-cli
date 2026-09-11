@@ -49,7 +49,7 @@ suffit de décommenter :
 | Objectif | À décommenter |
 |---|---|
 | Archive navigable au navigateur | `out = Html` (au lieu de `out = Eml`) |
-| Messages archivés vers la corbeille | `delete = 1` et `trash = 1` |
+| Messages archivés vers la corbeille | `trash = 1` |
 | Messages archivés effacés définitivement | `delete = 1` |
 | Ne prendre que les messages anciens | `before = "-2 years"` |
 
@@ -81,7 +81,7 @@ Lancez cette configuration **avant** celle qui purge, et ouvrez l'archive.
 
 ### `archive-2-ans-html-corbeille.ini`
 
-La même chose, plus `delete = 1` et `trash = 1` : les messages archivés
+La même chose, plus `trash = 1` : les messages archivés
 **quittent leurs dossiers pour la corbeille du serveur**, où ils restent
 récupérables tant qu'elle n'est pas vidée.
 
@@ -158,18 +158,19 @@ aucune confirmation.
 
 ### Passer par la corbeille
 
-Par défaut `delete = 1` **efface définitivement**. Ajoutez `trash` pour que les
-messages soient déplacés plutôt que détruits :
+`delete = 1` **efface définitivement**. `trash` déplace au lieu de détruire,
+et **se suffit à lui-même** : demander la corbeille, c'est déjà demander que
+les messages quittent leurs dossiers.
 
 ```ini
-delete = 1
-trash  = 1                   ; corbeille trouvée toute seule
+trash = 1                   ; corbeille trouvée toute seule
 ```
 
 ```ini
-delete = 1
-trash  = "INBOX/Corbeille"   ; ou nommée explicitement
+trash = "INBOX/Corbeille"   ; ou nommée explicitement
 ```
+
+`delete = 1` reste accepté à côté, sans effet supplémentaire.
 
 Avec `trash = 1`, l'outil demande au serveur quel dossier est sa corbeille —
 la plupart la désignent eux-mêmes, par l'attribut `\Trash` de la norme
@@ -189,6 +190,9 @@ Trois points de sûreté :
   suivante.
 - **Un message déjà dans la corbeille** est effacé sur place : l'y déplacer
   n'aurait pas de sens.
+- **Sur un gros dossier, le travail est découpé en lots.** Si un lot échoue,
+  les autres passent quand même, et seuls les messages réellement partis sont
+  notés comme purgés : le reste est réessayé à l'exécution suivante.
 
 > Sur le connecteur déprécié `ImapLegacy`, la détection ne peut pas s'appuyer
 > sur `\Trash` et se limite aux noms usuels. Nommez la corbeille explicitement.
