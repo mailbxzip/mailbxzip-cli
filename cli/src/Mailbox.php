@@ -299,6 +299,13 @@ class Mailbox {
      */
     private function purgeSource($zipFile) {
         if (!$this->deletionRequested()) {
+            // Staying quiet is right when nothing was asked for, but not when
+            // the keys are there and merely switched off: that reads as an
+            // export that ignored the request.
+            if (isset($this->config['delete']) || isset($this->config['trash'])) {
+                $this->log("'delete' and 'trash' are set to values that ask for nothing, the source is left untouched", 'WARNING');
+            }
+
             return;
         }
 
@@ -316,12 +323,14 @@ class Mailbox {
         $purged = is_file($purgedFilePath) ? (json_decode(file_get_contents($purgedFilePath), true) ?: []) : [];
 
         $total = 0;
+        $alreadyPurged = 0;
 
         foreach ($saved as $folder => $ids) {
             // Never ask twice for the same message.
             $pending = array_values(array_diff($ids, $purged[$folder] ?? []));
 
             if ($pending === []) {
+                $alreadyPurged += count($ids);
                 continue;
             }
 
@@ -354,6 +363,16 @@ class Mailbox {
         }
 
         $this->log("Total emails deleted from the source: $total");
+
+        // The quiet failure to explain: everything is on record as gone, so
+        // nothing is offered, and the run looks like it ignored the request.
+        if ($total === 0 && $alreadyPurged > 0) {
+            $this->log(
+                "$alreadyPurged e-mail(s) are already recorded as removed in purged_emails.json, so none were offered. "
+                ."Delete that file to have them tried again.",
+                'WARNING'
+            );
+        }
     }
 
     /**

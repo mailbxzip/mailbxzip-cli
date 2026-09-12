@@ -348,15 +348,50 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
      * @return bool Whether the batch may now be flagged for deletion.
      */
     private function copyBatch($connection, string $set, string $folder, string $target): bool {
-        $copied = $connection->copyManyMessages([$set], $target, Protocol::ST_UID);
+        // A refusal arrives as an exception, not as a failed response. Left
+        // to propagate it would abandon the whole folder, so the remaining
+        // batches never get their chance.
+        try {
+            $copied = $connection->copyManyMessages([$set], $target, Protocol::ST_UID);
 
-        if ($copied->successful()) {
-            return true;
+            if ($copied->successful()) {
+                return true;
+            }
+
+            $detail = $this->serverSaid($copied);
+        } catch (Throwable $e) {
+            $detail = trim($e->getMessage());
         }
 
-        $this->log("e-mails $set of folder $folder could not be copied to the trash '$target', they stay where they are", 'ERROR');
+        $this->log(
+            "e-mails $set of folder $folder could not be copied to the trash '$target', they stay where they are. "
+            .'Server said: '.($detail === '' ? '(no detail)' : $detail),
+            'ERROR'
+        );
 
         return false;
+    }
+
+    /**
+     * The server's own words for a failed command.
+     *
+     * webklex reduces every refusal to "NO UID COPY failed", which says
+     * nothing about the cause. The raw lines usually carry it: [TRYCREATE]
+     * for a missing mailbox, [OVERQUOTA] for a full one, a permission
+     * complaint for a read-only one.
+     */
+    private function serverSaid($response): string {
+        $lines = [];
+
+        foreach ((array) $response->getResponse() as $line) {
+            $line = trim(is_array($line) ? implode(' ', array_map('strval', $line)) : (string) $line);
+
+            if ($line !== '') {
+                $lines[] = $line;
+            }
+        }
+
+        return $lines === [] ? '(no detail)' : implode(' | ', array_slice($lines, -3));
     }
 
     /**
@@ -507,7 +542,36 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
             );
         }
 
+        // A container that holds only sub-folders cannot store a message, and
+        // every copy into it is refused. Say so now rather than once per
+        // folder, in the server's own words.
+        if (!$this->isSelectable($folders[$found] ?? [])) {
+            throw new RuntimeException(
+                "The trash folder '".$this->folderNameFor($found)."' is marked \\Noselect by the server: it cannot hold messages. "
+                ."Name a selectable one instead, among: ".$this->readableFolderNames($folders)."."
+            );
+        }
+
+        // Which folder was picked is the first thing to know when a copy is
+        // refused, and nothing else reveals it.
+        $this->log("trash resolved to '".$this->folderNameFor($found)."' (".$found.")");
+
         return $this->trashFolder = $found;
+    }
+
+    /**
+     * Whether a folder can actually hold messages.
+     *
+     * @param array $attributes The LIST attributes of the folder.
+     */
+    private function isSelectable(array $attributes): bool {
+        foreach ($attributes['flags'] ?? [] as $flag) {
+            if (strcasecmp(ltrim((string) $flag, '\\'), 'Noselect') === 0) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**

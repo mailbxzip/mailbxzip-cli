@@ -724,6 +724,18 @@ check('nothing deleted without the delete key', (function () use ($dir) {
     return !is_file($dir.'/archives/test@mailbxzip.com/purged_emails.json');
 })());
 
+// A purge that does nothing must say why, otherwise the run reads as having
+// ignored the request.
+$dir = workingDir('purge-diagnostics');
+$cleanup[] = $dir;
+$archive = $dir.'/archives/test@mailbxzip.com';
+
+(new Mailbox(writeConfig($dir, 'Test', 'Eml', ['delete' => 0, 'trash' => 0]), $dir))->start();
+check('keys switched off are reported', str_contains(file_get_contents($archive.'/export.log'), 'ask for nothing'));
+
+// The "already purged" report needs a source that can actually delete, so it
+// lives with the IMAP scenarios below.
+
 // ------------------------------------------------------- uid sequence sets ---
 echo "\nSequence sets — large uid lists fit in a command\n";
 
@@ -763,6 +775,69 @@ check('trash detected without attempting a deletion', $describing->detectTrashFo
 $windowed = new \Mailbxzip\Cli\In\Test(['address' => 'test@mailbxzip.com', 'since' => '2024-02-01']);
 $inbox = array_values(array_filter($windowed->describeFolders(), fn ($f) => $f['name'] === 'INBOX'))[0];
 check('counts follow the date window', $inbox['count'] === 0);
+
+// --------------------------------------------------- refused copy reporting ---
+$refusePort = 0;
+$refuseProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+if ($refuseProbe) {
+    $name = stream_socket_get_name($refuseProbe, false);
+    $refusePort = (int) substr($name, strrpos($name, ':') + 1);
+    fclose($refuseProbe);
+}
+
+$refuseProcess = @proc_open(
+    'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $refusePort --refuse-copy",
+    [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $refusePipes
+);
+
+if (is_resource($refuseProcess)) {
+    stream_set_timeout($refusePipes[1], 5);
+    fgets($refusePipes[1]);
+
+    echo "\nRefused copy — the run explains itself\n";
+
+    $dir = workingDir('copy-refused');
+    $cleanup[] = $dir;
+    $archive = $dir.'/archives/test@mailbxzip.com';
+    $config = writeConfig($dir, 'Imap', 'Eml', [
+        'server' => '{127.0.0.1:'.$refusePort.'/imap/notls}',
+        'username' => 'u', 'password' => 'p', 'trash' => 1,
+    ]);
+
+    $refused = new Mailbox($config, $dir);
+    $refused->start();
+    $log = file_get_contents($archive.'/export.log');
+
+    // Which folder was picked is the first thing to know, and nothing else
+    // revealed it.
+    check('the resolved trash is named', str_contains($log, "trash resolved to 'INBOX/Trash'"));
+    check("the server's own words are relayed", str_contains($log, '[OVERQUOTA]'));
+    check('a refusal does not abandon the other folders', substr_count($log, 'could not be copied to the trash') >= 2);
+    check('nothing recorded as purged', !is_file($archive.'/purged_emails.json'));
+    check('the messages are announced as retried', str_contains($log, 'will be retried on the next run'));
+
+    // Nothing moved, so a second run meets the very same messages: the case
+    // where everything is already on record as gone.
+    copy($archive.'/saved_emails.json', $archive.'/purged_emails.json');
+    file_put_contents($archive.'/export.log', '');
+
+    unset($refused);
+    gc_collect_cycles();
+
+    $again = new Mailbox($config, $dir);
+    $again->start();
+    $log = file_get_contents($archive.'/export.log');
+
+    check('already purged is reported', str_contains($log, 'already recorded as removed'));
+    check('the report names the remedy', str_contains($log, 'Delete that file'));
+
+    unset($again);
+    gc_collect_cycles();
+    proc_terminate($refuseProcess);
+    proc_close($refuseProcess);
+}
 
 // ------------------------------------------------------------------ done ----
 foreach ($cleanup as $dir) {

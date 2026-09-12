@@ -56,6 +56,9 @@ FLAGS = {
 # limit is enforced here so the batching of large uid sets is actually tested.
 LINE_LIMIT = 8192
 
+# Set by --refuse-copy, to exercise the reporting of a refused COPY.
+REFUSE_COPY = False
+
 
 def add_bulk_folder(count=2000):
     """Add a folder big enough that listing its uids one by one overshoots
@@ -191,6 +194,12 @@ class Handler(socketserver.StreamRequestHandler):
     def copy(self, tag, sequence, destination):
         source = MAILBOX.get(self.selected, {})
 
+        if REFUSE_COPY:
+            # What a full or read-only mailbox answers, and what the client
+            # has to relay for the cause to be knowable.
+            self.send(f"{tag} NO [OVERQUOTA] Quota exceeded on {destination}")
+            return
+
         if destination not in MAILBOX:
             self.send(f"{tag} NO [TRYCREATE] mailbox does not exist")
             return
@@ -254,6 +263,14 @@ if __name__ == "__main__":
 
     if "--bulk" in sys.argv:
         add_bulk_folder()
+
+    if "--refuse-copy" in sys.argv:
+        REFUSE_COPY = True
+
+    if "--noselect-trash" in sys.argv:
+        # A container that holds only sub-folders: it carries the trash
+        # attribute but cannot store a single message.
+        FLAGS["INBOX.Trash"] = "\\Noselect \\Trash"
     server = Server(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     print("READY", flush=True)
