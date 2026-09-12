@@ -5,6 +5,7 @@ namespace Mailbxzip\Cli\In;
 use Mailbxzip\Cli\Contract\DeletableInputInterface;
 use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Eml;
+use Mailbxzip\Cli\TrashUnavailableException;
 use Mailbxzip\Cli\Mailbox;
 use RuntimeException;
 use Throwable;
@@ -68,6 +69,9 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
 
     /** @var array<string,array>|null Raw LIST answer, fetched once */
     private $rawFolders = null;
+
+    /** @var bool|null Whether the server implements MOVE, asked once */
+    private $supportsMove = null;
 
     /**
      * @throws RuntimeException If the connection cannot be established.
@@ -307,24 +311,38 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
             $original[(int) $id] = $id;
         }
 
+        // MOVE relocates a message; COPY duplicates it and only then is the
+        // original erased. On a mailbox that is short of room -- the very
+        // reason one archives -- the copy is refused and nothing moves.
+        $relocate = $moving && $this->supportsMove();
+
+        if ($moving) {
+            $this->log($relocate
+                ? "moving to '".$this->folderNameFor($target)."' with MOVE"
+                : "the server has no MOVE, falling back to COPY; it needs room for a second copy of each message");
+        }
+
         $removed = [];
         $expunge = false;
 
         foreach (self::sequenceChunks(array_keys($original)) as $ranges) {
             $set = self::renderSet($ranges);
 
-            if ($moving && !$this->copyBatch($connection, $set, $folder, $target)) {
-                // Never flag what could not be copied: that would be the very
-                // data loss the trash is meant to prevent. The batch stays and
-                // is retried on the next run.
+            // Both raise on refusal rather than moving on: the trash is the
+            // same for every batch, so insisting only piles up identical
+            // errors and wears the connection down.
+            if ($relocate) {
+                $this->moveBatch($connection, $set, $folder, $target);
+            } elseif ($moving) {
+                $this->copyBatch($connection, $set, $folder, $target);
+            }
+
+            // MOVE has already taken the messages out of the folder.
+            if (!$relocate && !$this->flagBatch($connection, $ranges, $folder)) {
                 continue;
             }
 
-            if (!$this->flagBatch($connection, $ranges, $folder)) {
-                continue;
-            }
-
-            $expunge = true;
+            $expunge = $expunge || !$relocate;
 
             foreach (self::expandRanges($ranges) as $id) {
                 $removed[] = $original[$id];
@@ -343,19 +361,70 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
     }
 
     /**
+     * Whether the server implements MOVE (RFC 6851).
+     */
+    private function supportsMove(): bool {
+        if (!is_null($this->supportsMove)) {
+            return $this->supportsMove;
+        }
+
+        $capabilities = [];
+
+        try {
+            $response = $this->client->getConnection()->getCapabilities();
+
+            if ($response->successful()) {
+                // array_walk_recursive takes its array by reference, so the
+                // cast has to land in a variable first.
+                $data = (array) $response->data();
+
+                array_walk_recursive($data, function ($value) use (&$capabilities) {
+                    $capabilities[] = strtoupper(trim((string) $value));
+                });
+            }
+        } catch (Throwable $e) {
+            // An unreadable answer is not a reason to fail; COPY still works
+            // wherever there is room.
+        }
+
+        return $this->supportsMove = in_array('MOVE', $capabilities, true);
+    }
+
+    /**
+     * Move one batch to the trash, in a single command and without ever
+     * holding two copies of a message.
+     *
+     * @throws TrashUnavailableException If the server turns the move down.
+     */
+    private function moveBatch($connection, string $set, string $folder, string $target): void {
+        try {
+            $moved = $connection->moveManyMessages([$set], $target, Protocol::ST_UID);
+
+            if ($moved->successful()) {
+                return;
+            }
+
+            $detail = $this->serverSaid($moved);
+        } catch (Throwable $e) {
+            $detail = trim($e->getMessage());
+        }
+
+        throw new TrashUnavailableException($this->refusalMessage('move', $set, $folder, $target, $detail));
+    }
+
+    /**
      * Copy one batch to the trash.
      *
-     * @return bool Whether the batch may now be flagged for deletion.
+     * @throws TrashUnavailableException If the server turns the copy down.
      */
-    private function copyBatch($connection, string $set, string $folder, string $target): bool {
-        // A refusal arrives as an exception, not as a failed response. Left
-        // to propagate it would abandon the whole folder, so the remaining
-        // batches never get their chance.
+    private function copyBatch($connection, string $set, string $folder, string $target): void {
+        // A refusal arrives as an exception on some paths and as a failed
+        // response on others; both mean the same thing here.
         try {
             $copied = $connection->copyManyMessages([$set], $target, Protocol::ST_UID);
 
             if ($copied->successful()) {
-                return true;
+                return;
             }
 
             $detail = $this->serverSaid($copied);
@@ -363,13 +432,28 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
             $detail = trim($e->getMessage());
         }
 
-        $this->log(
-            "e-mails $set of folder $folder could not be copied to the trash '$target', they stay where they are. "
-            .'Server said: '.($detail === '' ? '(no detail)' : $detail),
-            'ERROR'
-        );
+        throw new TrashUnavailableException($this->refusalMessage('copy', $set, $folder, $target, $detail));
+    }
 
-        return false;
+    /**
+     * Word a refusal so the cause can be acted on.
+     *
+     * A bare "NO ... failed" is what most servers answer when the account is
+     * out of room, so the possibility is raised rather than left to be
+     * guessed at.
+     */
+    private function refusalMessage(string $verb, string $set, string $folder, string $target, string $detail): string {
+        $detail = ($detail === '') ? '(no detail)' : $detail;
+
+        $message = "the trash '".$this->folderNameFor($target)."' refused a $verb of ".(substr_count($set, ',') + 1)
+            ." batch(es) from folder '".$this->folderNameFor($folder)."', nothing was deleted. Server said: $detail.";
+
+        if ($verb === 'copy') {
+            $message .= ' A copy needs room for a second instance of every message, so a mailbox at its quota refuses it;'
+                .' a server offering MOVE would not need that room.';
+        }
+
+        return $message.' Check the folder with "php cli.php folders <config>", and name another with trash = "...".';
     }
 
     /**
@@ -553,8 +637,16 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         }
 
         // Which folder was picked is the first thing to know when a copy is
-        // refused, and nothing else reveals it.
-        $this->log("trash resolved to '".$this->folderNameFor($found)."' (".$found.")");
+        // refused, and nothing else reveals it. Say too where the choice came
+        // from: a name match is a guess, and a wrong guess looks exactly like
+        // a broken server.
+        $origin = is_null($wanted)
+            ? (($this->folderFlaggedAsTrash($folders) === $found)
+                ? 'the server declares it as its trash'
+                : 'GUESSED FROM ITS NAME, the server declares no trash; check it is the right one')
+            : 'named in the configuration';
+
+        $this->log("trash resolved to '".$this->folderNameFor($found)."' (".$found.") -- ".$origin);
 
         return $this->trashFolder = $found;
     }

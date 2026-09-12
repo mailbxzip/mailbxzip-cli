@@ -59,6 +59,9 @@ LINE_LIMIT = 8192
 # Set by --refuse-copy, to exercise the reporting of a refused COPY.
 REFUSE_COPY = False
 
+# Set by --no-move, to exercise the COPY fallback.
+NO_MOVE = False
+
 
 def add_bulk_folder(count=2000):
     """Add a folder big enough that listing its uids one by one overshoots
@@ -105,7 +108,9 @@ class Handler(socketserver.StreamRequestHandler):
             tag, command, args = parts[0], parts[1].upper(), parts[2:]
 
             if command == "CAPABILITY":
-                self.send("* CAPABILITY IMAP4rev1")
+                # MOVE (RFC 6851) relocates without duplicating; --no-move
+                # plays the part of an older server that lacks it.
+                self.send("* CAPABILITY IMAP4rev1" + ("" if NO_MOVE else " MOVE"))
                 self.send(f"{tag} OK CAPABILITY completed")
             elif command == "LOGIN":
                 self.send(f"{tag} OK LOGIN completed")
@@ -128,6 +133,8 @@ class Handler(socketserver.StreamRequestHandler):
                 self.fetch(tag, args[1], " ".join(args[2:]))
             elif command == "UID" and args and args[0].upper() == "STORE":
                 self.store(tag, args[1], " ".join(args[2:]))
+            elif command == "UID" and args and args[0].upper() == "MOVE":
+                self.move(tag, args[1], self.unquote(" ".join(args[2:])))
             elif command == "UID" and args and args[0].upper() == "COPY":
                 self.copy(tag, args[1], self.unquote(" ".join(args[2:])))
             elif command == "EXPUNGE":
@@ -211,6 +218,26 @@ class Handler(socketserver.StreamRequestHandler):
 
         self.send(f"{tag} OK COPY completed")
 
+    def move(self, tag, sequence, destination):
+        """MOVE: relocate, so the source keeps no copy and no extra room is
+        needed in the account."""
+        source = MAILBOX.get(self.selected, {})
+
+        if REFUSE_COPY:
+            # A mailbox with no room left turns both verbs away.
+            self.send(f"{tag} NO [OVERQUOTA] Quota exceeded on {destination}")
+            return
+
+        if destination not in MAILBOX:
+            self.send(f"{tag} NO [TRYCREATE] mailbox does not exist")
+            return
+
+        for uid in self.expand(sequence, source):
+            new_uid = max(MAILBOX[destination] or [1000]) + 1
+            MAILBOX[destination][new_uid] = source.pop(uid)
+
+        self.send(f"{tag} OK MOVE completed")
+
     def store(self, tag, sequence, rest):
         """Only \\Deleted matters here: flag the messages, expunge removes them."""
         folder = MAILBOX.get(self.selected, {})
@@ -266,6 +293,14 @@ if __name__ == "__main__":
 
     if "--refuse-copy" in sys.argv:
         REFUSE_COPY = True
+
+    if "--no-move" in sys.argv:
+        NO_MOVE = True
+
+    if "--no-special-use" in sys.argv:
+        # A server that declares nothing, leaving the client to guess from
+        # the folder names alone.
+        FLAGS.clear()
 
     if "--noselect-trash" in sys.argv:
         # A container that holds only sub-folders: it carries the trash

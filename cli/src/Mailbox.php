@@ -5,6 +5,7 @@ namespace Mailbxzip\Cli;
 use Exception;
 use RuntimeException;
 use Mailbxzip\Cli\Contract\DeletableInputInterface;
+use Mailbxzip\Cli\TrashUnavailableException;
 use Mailbxzip\Cli\Contract\InputHandlerInterface;
 use Mailbxzip\Cli\Contract\OutputHandlerInterface;
 
@@ -338,6 +339,11 @@ class Mailbox {
 
             try {
                 $removed = $this->inputHandler->deleteEmails($folder, $pending);
+            } catch (TrashUnavailableException $e) {
+                // The trash serves every folder, so one refusal condemns them
+                // all: stop here instead of repeating the same error.
+                $this->log('deletion abandoned: '.$e->getMessage(), 'ERROR');
+                break;
             } catch (\Throwable $e) {
                 $this->log("deletion failed for folder $folder: ".$e->getMessage(), 'ERROR');
                 continue;

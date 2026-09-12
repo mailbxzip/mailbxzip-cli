@@ -205,6 +205,25 @@ Trois points de sûreté :
   les autres passent quand même, et seuls les messages réellement partis sont
   notés comme purgés : le reste est réessayé à l'exécution suivante.
 
+**Vérifiez ce qui a été retenu.** Le journal l'indique à chaque purge :
+
+```
+[INFO] trash resolved to 'Corbeille' (INBOX.Corbeille) -- the server declares it as its trash
+```
+
+Si la mention est `GUESSED FROM ITS NAME`, le serveur n'a rien déclaré et le
+choix repose sur le seul nom du dossier. Sur une boîte qui possède à la fois
+un `Trash` résiduel et une vraie `Éléments supprimés`, la devinette peut tomber
+sur le mauvais. Nommez alors la bonne :
+
+```ini
+trash = "Éléments supprimés"
+```
+
+Si la corbeille retenue refuse les messages, **la purge s'arrête net** au
+premier refus, avec les mots du serveur : elle sert tous les dossiers, insister
+ne ferait qu'empiler la même erreur.
+
 > Sur le connecteur déprécié `ImapLegacy`, la détection ne peut pas s'appuyer
 > sur `\Trash` et se limite aux noms usuels. Nommez la corbeille explicitement.
 

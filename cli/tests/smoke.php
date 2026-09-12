@@ -583,6 +583,11 @@ if (!$spawned && !@stream_socket_client("tcp://127.0.0.1:$imapPort", $errno, $er
 
         check('trash located through its SPECIAL-USE flag', str_contains($log, "moved to 'INBOX.Trash'"));
 
+    // MOVE relocates; COPY needs room for a second instance of every message,
+    // which a mailbox at its quota -- the very reason one archives -- refuses.
+    check('MOVE preferred when the server offers it', str_contains($log, 'with MOVE'));
+    check('no copy attempted when moving', !str_contains($log, 'falling back to COPY'));
+
         // What the folders command shows: the readable name next to the raw,
         // encoded identifier nobody could guess.
         $inspector = new \Mailbxzip\Cli\In\Imap([
@@ -813,10 +818,17 @@ if (is_resource($refuseProcess)) {
     // Which folder was picked is the first thing to know, and nothing else
     // revealed it.
     check('the resolved trash is named', str_contains($log, "trash resolved to 'INBOX/Trash'"));
+    check('the origin of the choice is stated', str_contains($log, 'the server declares it as its trash'));
     check("the server's own words are relayed", str_contains($log, '[OVERQUOTA]'));
-    check('a refusal does not abandon the other folders', substr_count($log, 'could not be copied to the trash') >= 2);
+    check('the remedy is spelled out', str_contains($log, 'php cli.php folders'));
+    check('a refusal names the verb that was turned down', str_contains($log, 'refused a move') || str_contains($log, 'refused a copy'));
     check('nothing recorded as purged', !is_file($archive.'/purged_emails.json'));
-    check('the messages are announced as retried', str_contains($log, 'will be retried on the next run'));
+
+    // The trash serves every folder: one refusal has to stop the lot rather
+    // than repeat itself batch after batch, which used to wear the connection
+    // down and bury the cause under pages of identical errors.
+    check('the purge stops at the first refusal', substr_count($log, 'refused') === 1);
+    check('the run says it gave up', str_contains($log, 'deletion abandoned'));
 
     // Nothing moved, so a second run meets the very same messages: the case
     // where everything is already on record as gone.
@@ -837,6 +849,101 @@ if (is_resource($refuseProcess)) {
     gc_collect_cycles();
     proc_terminate($refuseProcess);
     proc_close($refuseProcess);
+}
+
+// ------------------------------------------------------------ copy fallback ---
+$noMovePort = 0;
+$noMoveProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+if ($noMoveProbe) {
+    $name = stream_socket_get_name($noMoveProbe, false);
+    $noMovePort = (int) substr($name, strrpos($name, ':') + 1);
+    fclose($noMoveProbe);
+}
+
+$noMoveProcess = @proc_open(
+    'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $noMovePort --no-move",
+    [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $noMovePipes
+);
+
+if (is_resource($noMoveProcess)) {
+    stream_set_timeout($noMovePipes[1], 5);
+    fgets($noMovePipes[1]);
+
+    echo "\nServer without MOVE — the copy fallback still works\n";
+
+    $dir = workingDir('no-move');
+    $cleanup[] = $dir;
+    $archive = $dir.'/archives/test@mailbxzip.com';
+
+    $fallback = new Mailbox(writeConfig($dir, 'Imap', 'Eml', [
+        'server' => '{127.0.0.1:'.$noMovePort.'/imap/notls}',
+        'username' => 'u', 'password' => 'p', 'trash' => 1,
+    ]), $dir);
+    $fallback->start();
+
+    $log = file_get_contents($archive.'/export.log');
+    check('the fallback is announced, and why it costs room', str_contains($log, 'falling back to COPY'));
+
+    $left = (new \Mailbxzip\Cli\In\Imap([
+        'address' => 'test@mailbxzip.com',
+        'host' => '127.0.0.1', 'port' => $noMovePort, 'encryption' => 'none',
+        'username' => 'u', 'password' => 'p',
+    ]))->getEmails();
+
+    check('messages still reach the trash without MOVE', count($left['INBOX.Trash'] ?? []) === 5);
+    check('and leave their folder', count($left['INBOX'] ?? []) === 0);
+
+    unset($fallback);
+    gc_collect_cycles();
+    proc_terminate($noMoveProcess);
+    proc_close($noMoveProcess);
+}
+
+// ------------------------------------------------------------ guessed trash ---
+$guessPort = 0;
+$guessProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+if ($guessProbe) {
+    $name = stream_socket_get_name($guessProbe, false);
+    $guessPort = (int) substr($name, strrpos($name, ':') + 1);
+    fclose($guessProbe);
+}
+
+$guessProcess = @proc_open(
+    'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $guessPort --no-special-use",
+    [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $guessPipes
+);
+
+if (is_resource($guessProcess)) {
+    stream_set_timeout($guessPipes[1], 5);
+    fgets($guessPipes[1]);
+
+    echo "\nGuessed trash — a name match is announced as a guess\n";
+
+    $dir = workingDir('trash-guessed');
+    $cleanup[] = $dir;
+    $archive = $dir.'/archives/test@mailbxzip.com';
+
+    $guessed = new Mailbox(writeConfig($dir, 'Imap', 'Eml', [
+        'server' => '{127.0.0.1:'.$guessPort.'/imap/notls}',
+        'username' => 'u', 'password' => 'p', 'trash' => 1,
+    ]), $dir);
+    $guessed->start();
+
+    $log = file_get_contents($archive.'/export.log');
+
+    // Without the SPECIAL-USE attribute the choice rests on the folder name
+    // alone, and a wrong guess looks exactly like a broken server.
+    check('a name match is flagged as a guess', str_contains($log, 'GUESSED FROM ITS NAME'));
+    check('the guess still works when it is right', str_contains($log, "moved to 'INBOX.Trash'"));
+
+    unset($guessed);
+    gc_collect_cycles();
+    proc_terminate($guessProcess);
+    proc_close($guessProcess);
 }
 
 // ------------------------------------------------------------------ done ----
