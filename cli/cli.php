@@ -12,6 +12,9 @@ use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Helper\TableSeparator;
+use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Mailbox;
 
 $workingDir = getenv('HOME').'/.config/mailbxzip';
@@ -105,6 +108,96 @@ class MailboxCommand extends Command
             // Add your logic here
         } else {
             $output->writeln('No command specified. Use --help to see available commands.');
+        }
+
+        return Command::SUCCESS;
+    }
+}
+
+class FoldersCommand extends Command
+{
+    public function __construct()
+    {
+        parent::__construct('folders');
+    }
+
+    protected function configure()
+    {
+        $this
+            ->setDescription('List the folders of the mailbox, and say which one is its trash.')
+            ->setHelp(
+                "Folder names travel encoded over IMAP, so they cannot be guessed from\n"
+                ."the outside. This lists them as the archive will write them, next to\n"
+                ."the raw identifier the server uses. Either spelling is accepted by the\n"
+                ."'trash' configuration entry."
+            )
+            ->addArgument('email', InputArgument::REQUIRED, 'config filename');
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        global $workingDir;
+
+        $handler = (new Mailbox($input->getArgument('email'), $workingDir))->getInputHandler();
+
+        if (!$handler instanceof DescribesFoldersInterface) {
+            $output->writeln('<error>The input connector '.get_class($handler).' cannot list its folders.</error>');
+
+            return Command::FAILURE;
+        }
+
+        $folders = $handler->describeFolders();
+
+        if ($folders === []) {
+            $output->writeln('<comment>No folder found.</comment>');
+
+            return Command::SUCCESS;
+        }
+
+        $trash = $handler->detectTrashFolder();
+        $encoded = false;
+        $rows = [];
+
+        foreach ($folders as $folder) {
+            $isTrash = ($folder['path'] === $trash);
+            $encoded = $encoded || ($folder['path'] !== $folder['name']);
+
+            $rows[] = [
+                $folder['count'],
+                $isTrash ? '<info>corbeille</info>' : '',
+                $isTrash ? '<info>'.$folder['name'].'</info>' : $folder['name'],
+                $folder['path'] === $folder['name'] ? '' : $folder['path'],
+                implode(' ', $folder['flags']),
+            ];
+        }
+
+        $table = new Table($output);
+        $table->setHeaders(['Messages', '', 'Nom (pour trash)', 'Chemin IMAP', 'Attributs']);
+        $table->setRows($rows);
+        $table->render();
+
+        $output->writeln('');
+
+        if (!is_null($trash)) {
+            $name = $trash;
+
+            foreach ($folders as $folder) {
+                if ($folder['path'] === $trash) {
+                    $name = $folder['name'];
+                }
+            }
+
+            $output->writeln('Corbeille reconnue : <info>'.$name.'</info> — <comment>trash = 1</comment> suffit.');
+            $output->writeln('Pour en imposer une autre : <comment>trash = "'.$name.'"</comment>');
+        } else {
+            $output->writeln('<comment>Aucune corbeille reconnue automatiquement.</comment>');
+            $output->writeln('Indiquez-la dans la configuration, avec le nom ou le chemin ci-dessus :');
+            $output->writeln('    <comment>trash = "'.$folders[0]['name'].'"</comment>');
+        }
+
+        if ($encoded) {
+            $output->writeln('');
+            $output->writeln('<comment>Les deux écritures sont acceptées par « trash », et « / » remplace le séparateur du serveur.</comment>');
         }
 
         return Command::SUCCESS;
@@ -227,6 +320,7 @@ class ConfigCommand extends Command
 
 $application = new MailbxzipApp();
 $application->add(new MailboxCommand());
+$application->add(new FoldersCommand());
 $application->add(new ConfigCommand());
 $application->run();
 

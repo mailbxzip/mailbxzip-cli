@@ -131,6 +131,15 @@ class Mailbox {
     }
 
     /**
+     * Get the input connector, to inspect the source without exporting it.
+     *
+     * @return object The input handler.
+     */
+    public function getInputHandler() {
+        return $this->inputHandler;
+    }
+
+    /**
      * Get the current configuration.
      *
      * @return array The configuration array.

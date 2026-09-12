@@ -582,11 +582,35 @@ if (!$spawned && !@stream_socket_client("tcp://127.0.0.1:$imapPort", $errno, $er
         $log = file_get_contents($dir.'/archives/test@mailbxzip.com/export.log');
 
         check('trash located through its SPECIAL-USE flag', str_contains($log, "moved to 'INBOX.Trash'"));
+
+        // What the folders command shows: the readable name next to the raw,
+        // encoded identifier nobody could guess.
+        $inspector = new \Mailbxzip\Cli\In\Imap([
+            'address' => 'test@mailbxzip.com',
+            'host' => '127.0.0.1', 'port' => $trashPort, 'encryption' => 'none',
+            'username' => 'u', 'password' => 'p',
+        ]);
+        $imapFolders = $inspector->describeFolders();
+        $byName = array_column($imapFolders, null, 'name');
+
+        check('encoded path surfaced beside the readable name', ($byName['INBOX/Éléments envoyés']['path'] ?? '') === 'INBOX.&AMk-l&AOk-ments envoy&AOk-s');
+        check('imap trash detected from its flag', $inspector->detectTrashFolder() === 'INBOX.Trash');
+
+        // An unknown trash must say which names would have worked.
+        $wrong = new \Mailbxzip\Cli\In\Imap([
+            'address' => 'test@mailbxzip.com',
+            'host' => '127.0.0.1', 'port' => $trashPort, 'encryption' => 'none',
+            'username' => 'u', 'password' => 'p', 'trash' => 'Corbeille',
+        ]);
+
+        fails('unknown trash lists the available folders', function () use ($wrong) {
+            $wrong->deleteEmails('INBOX', [101]);
+        }, 'Name one of: "INBOX"');
         check('archived messages left their folder', count($after['INBOX'] ?? []) === 1);
         check('message outside the window stayed put', in_array('104', $after['INBOX'] ?? [], true));
         check('archived messages are in the trash', count($after['INBOX.Trash'] ?? []) === 4);
 
-        unset($trashed);
+        unset($trashed, $inspector, $wrong);
         gc_collect_cycles();
         proc_terminate($trashProcess);
         proc_close($trashProcess);
@@ -723,6 +747,22 @@ $longest = max(array_map(fn ($c) => strlen($render($c)), $fragmented));
 check('fragmented lists are split into batches', count($fragmented) > 1);
 check('no batch exceeds the cap', $longest <= 900);
 check('batching loses no uid', array_sum(array_map('count', array_map(fn ($c) => array_merge(...array_map(fn ($r) => range($r[0], $r[1]), $c)), $fragmented))) === 2000);
+
+// ------------------------------------------------------- folder inspection ---
+echo "\nFolder inspection — naming the trash is possible at all\n";
+
+$describing = new \Mailbxzip\Cli\In\Test(['address' => 'test@mailbxzip.com']);
+$described = $describing->describeFolders();
+
+check('every folder described', count($described) === 6);
+check('description carries name, path, count and flags', array_keys($described[0]) === ['name', 'path', 'count', 'flags']);
+check('trash advertised through its flag', in_array('Trash', $described[4]['flags'] ?? [], true));
+check('trash detected without attempting a deletion', $describing->detectTrashFolder() === 'INBOX/Corbeille');
+
+// The counts follow the date window, like the archive itself.
+$windowed = new \Mailbxzip\Cli\In\Test(['address' => 'test@mailbxzip.com', 'since' => '2024-02-01']);
+$inbox = array_values(array_filter($windowed->describeFolders(), fn ($f) => $f['name'] === 'INBOX'))[0];
+check('counts follow the date window', $inbox['count'] === 0);
 
 // ------------------------------------------------------------------ done ----
 foreach ($cleanup as $dir) {

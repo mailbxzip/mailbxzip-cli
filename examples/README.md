@@ -172,6 +172,16 @@ trash = "INBOX/Corbeille"   ; ou nommée explicitement
 
 `delete = 1` reste accepté à côté, sans effet supplémentaire.
 
+Pour voir les dossiers du compte et savoir laquelle sera retenue :
+
+```bash
+cd cli && php cli.php folders mon-archive
+```
+
+Les noms voyagent encodés sur le réseau — `Éléments supprimés` arrive comme
+`&AMk-l&AOk-ments supprim&AOk-s` — donc impossibles à deviner. La commande
+affiche le nom lisible et l'identifiant brut ; `trash` accepte les deux.
+
 Avec `trash = 1`, l'outil demande au serveur quel dossier est sa corbeille —
 la plupart la désignent eux-mêmes, par l'attribut `\Trash` de la norme
 SPECIAL-USE. À défaut, il reconnaît les noms usuels : `Trash`, `Corbeille`,
@@ -184,7 +194,8 @@ Trois points de sûreté :
 
 - **Si la corbeille est introuvable, rien n'est supprimé.** L'export s'arrête
   sur un message explicite plutôt que de se rabattre sur un effacement
-  définitif — c'est l'inverse de ce que vous auriez demandé.
+  définitif — c'est l'inverse de ce que vous auriez demandé. Le message
+  **énumère les dossiers disponibles**, de quoi corriger sans chercher.
 - **Si la copie vers la corbeille échoue, rien n'est effacé** du dossier
   d'origine. Le message reste à sa place et sera retenté à l'exécution
   suivante.

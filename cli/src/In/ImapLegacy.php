@@ -4,6 +4,7 @@ namespace Mailbxzip\Cli\In;
 
 use RuntimeException;
 use Mailbxzip\Cli\Contract\DeletableInputInterface;
+use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Eml;
 use Mailbxzip\Cli\Mailbox;
 
@@ -18,7 +19,7 @@ use Mailbxzip\Cli\Mailbox;
  *             which speaks the protocol directly and needs no extension. Both
  *             honour the same contract and read the same configuration.
  */
-class ImapLegacy extends AbstractInput implements DeletableInputInterface {
+class ImapLegacy extends AbstractInput implements DeletableInputInterface, DescribesFoldersInterface {
     private $imap;
 
     /** @var string|null Resolved trash mailbox, looked up once */
@@ -215,6 +216,62 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface {
         }
 
         return $removed;
+    }
+
+    /**
+     * Describe every folder of the account.
+     *
+     * ext-imap exposes no SPECIAL-USE attribute, so the flags stay empty and
+     * the trash can only be recognised by name here.
+     *
+     * @return array<int,array{name: string, path: string, count: int, flags: array<int,string>}>
+     */
+    public function describeFolders(): array {
+        $described = [];
+
+        foreach (imap_list($this->imap, $this->config['server'], '*') ?: [] as $path) {
+            imap_reopen($this->imap, $path);
+
+            $described[] = [
+                'name' => $this->normalizeFolderName((string) $path),
+                'path' => (string) $path,
+                'count' => (int) imap_num_msg($this->imap),
+                'flags' => [],
+            ];
+        }
+
+        return $described;
+    }
+
+    public function detectTrashFolder(): ?string {
+        try {
+            $trash = $this->trashFolder;
+            $this->trashFolder = null;
+            $found = $this->resolveTrashFolderByName();
+            $this->trashFolder = $trash;
+
+            return $found;
+        } catch (\Throwable $e) {
+            return null;
+        }
+    }
+
+    /**
+     * Look for a folder carrying one of the usual trash names.
+     */
+    private function resolveTrashFolderByName(): ?string {
+        $known = ['trash', 'deleted', 'deleted items', 'deleted messages', 'corbeille', 'éléments supprimés', 'elements supprimes', 'papierkorb', 'prullenbak', 'cestino', 'papelera'];
+
+        foreach (imap_list($this->imap, $this->config['server'], '*') ?: [] as $path) {
+            $name = $this->normalizeFolderName((string) $path);
+            $segments = explode('/', $name);
+
+            if (in_array(mb_strtolower((string) end($segments)), $known, true)) {
+                return (string) $path;
+            }
+        }
+
+        return null;
     }
 
     /**

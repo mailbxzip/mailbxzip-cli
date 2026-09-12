@@ -3,6 +3,7 @@
 namespace Mailbxzip\Cli\In;
 
 use Mailbxzip\Cli\Contract\DeletableInputInterface;
+use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Eml;
 use Mailbxzip\Cli\Mailbox;
 use RuntimeException;
@@ -29,7 +30,7 @@ use Webklex\PHPIMAP\IMAP as Protocol;
  * server string is understood by both, so existing configurations keep
  * working untouched.
  */
-class Imap extends AbstractInput implements DeletableInputInterface {
+class Imap extends AbstractInput implements DeletableInputInterface, DescribesFoldersInterface {
 
     public const HELP = 'Import e-mails from an imap account (no PHP extension required)';
 
@@ -64,6 +65,9 @@ class Imap extends AbstractInput implements DeletableInputInterface {
 
     /** @var string|null Resolved trash mailbox, looked up once */
     private $trashFolder = null;
+
+    /** @var array<string,array>|null Raw LIST answer, fetched once */
+    private $rawFolders = null;
 
     /**
      * @throws RuntimeException If the connection cannot be established.
@@ -478,28 +482,104 @@ class Imap extends AbstractInput implements DeletableInputInterface {
             return $this->trashFolder;
         }
 
-        $response = $this->client->getConnection()->folders();
-        $folders = $response->successful() ? $response->data() : [];
+        $folders = $this->rawFolders();
 
-        if (!is_array($folders) || $folders === []) {
+        if ($folders === []) {
             throw new RuntimeException('Unable to list the folders to locate the trash.');
         }
 
         $wanted = $this->trashSetting()['folder'];
 
         $found = is_null($wanted)
-            ? ($this->folderFlaggedAsTrash($folders) ?? $this->folderNamedAsTrash($folders))
+            ? $this->detectTrashFolder()
             : $this->folderMatching($folders, $wanted);
 
         if (is_null($found)) {
+            // Name the folders rather than leave the operator guessing: they
+            // travel encoded, so they cannot be worked out from the outside.
+            $available = $this->readableFolderNames($folders);
+
             throw new RuntimeException(
-                is_null($wanted)
-                    ? "'trash = 1' was asked for, but no trash folder could be found on the server. Name it explicitly, for instance trash = \"INBOX.Trash\"."
-                    : "The trash folder '$wanted' does not exist on the server."
+                (is_null($wanted)
+                    ? "'trash = 1' was asked for, but no trash folder could be found on the server."
+                    : "The trash folder '$wanted' does not exist on the server.")
+                ." Name one of: ".$available.". Run \"php cli.php folders <config>\" to see them all."
             );
         }
 
         return $this->trashFolder = $found;
+    }
+
+    /**
+     * The raw LIST answer, fetched once per connection.
+     *
+     * @return array<string,array>
+     */
+    private function rawFolders(): array {
+        if (is_null($this->rawFolders)) {
+            $response = $this->client->getConnection()->folders();
+            $folders = $response->successful() ? $response->data() : [];
+
+            $this->rawFolders = is_array($folders) ? $folders : [];
+        }
+
+        return $this->rawFolders;
+    }
+
+    /**
+     * A short, readable list of the folders, for an error message.
+     *
+     * @param array<string,array> $folders
+     */
+    private function readableFolderNames(array $folders, int $limit = 12): string {
+        $names = [];
+
+        foreach (array_keys($folders) as $path) {
+            $names[] = '"'.$this->folderNameFor((string) $path).'"';
+        }
+
+        if (count($names) > $limit) {
+            $names = array_slice($names, 0, $limit);
+            $names[] = '...';
+        }
+
+        return implode(', ', $names);
+    }
+
+    /**
+     * Describe every folder: name on disk, raw path, volume and attributes.
+     *
+     * @return array<int,array{name: string, path: string, count: int, flags: array<int,string>}>
+     */
+    public function describeFolders(): array {
+        $raw = $this->rawFolders();
+        $described = [];
+
+        foreach ($this->client->getFolders(false) as $folder) {
+            $flags = [];
+
+            foreach ($raw[$folder->path]['flags'] ?? [] as $flag) {
+                $flags[] = ltrim((string) $flag, '\\');
+            }
+
+            $described[] = [
+                'name' => $this->folderNameFor($folder->path),
+                'path' => (string) $folder->path,
+                'count' => (int) ($folder->examine()['exists'] ?? 0),
+                'flags' => $flags,
+            ];
+        }
+
+        return $described;
+    }
+
+    /**
+     * The folder this connector would use as trash, left to itself.
+     */
+    public function detectTrashFolder(): ?string {
+        $folders = $this->rawFolders();
+
+        return $this->folderFlaggedAsTrash($folders) ?? $this->folderNamedAsTrash($folders);
     }
 
     /**

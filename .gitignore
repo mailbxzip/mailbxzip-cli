@@ -3,3 +3,4 @@ cli/vendor
 cli/config
 _legacy-zip
 mailbxzip.zip
+__pycache__

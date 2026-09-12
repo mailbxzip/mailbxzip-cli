@@ -2,6 +2,7 @@
 
 namespace Mailbxzip\Cli\In;
 
+use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Eml;
 use RuntimeException;
 
@@ -16,7 +17,7 @@ use RuntimeException;
  * whose headers cannot be parsed, so that the folder normalisation and the
  * filename fallback are both covered.
  */
-class Test extends AbstractInput {
+class Test extends AbstractInput implements DescribesFoldersInterface {
     public const HELP = 'Fake eml email for test only';
 
     public const MINIMAL_CONFIG_VAR = [
@@ -24,6 +25,9 @@ class Test extends AbstractInput {
     ];
 
     public const CONFIG_VAR = self::DATE_CONFIG_VAR;
+
+    /** The fixture playing the part of a trash folder. */
+    private const TRASH_FOLDER = 'INBOX/Corbeille';
 
     public const CAN_DELETE = false;
 
@@ -68,6 +72,30 @@ class Test extends AbstractInput {
         }
 
         return new Eml($messages[$folder][$id], $this->folderName($folder), $id, $this->config['address'] ?? null);
+    }
+
+    /**
+     * @return array<int,array{name: string, path: string, count: int, flags: array<int,string>}>
+     */
+    public function describeFolders(): array {
+        $described = [];
+
+        foreach ($this->messages() as $folder => $messages) {
+            $name = $this->folderName($folder);
+
+            $described[] = [
+                'name' => $name,
+                'path' => $folder,
+                'count' => count($this->selected($messages)),
+                'flags' => ($name === self::TRASH_FOLDER) ? ['HasNoChildren', 'Trash'] : ['HasNoChildren'],
+            ];
+        }
+
+        return $described;
+    }
+
+    public function detectTrashFolder(): ?string {
+        return isset($this->messages()[self::TRASH_FOLDER]) ? self::TRASH_FOLDER : null;
     }
 
     /**
@@ -172,6 +200,9 @@ class Test extends AbstractInput {
                     "Contenu de la piece jointe.\n"
                 ),
             ],
+            // Stands in for a trash folder, so the listing command and the
+            // detection have something to find offline.
+            'INBOX/Corbeille' => [],
             'INBOX/Brouillons' => [
                 // No parsable Date header: exercises the Eml::filename() fallback.
                 4 => "Subject: sans date\r\n\r\nBrouillon.",

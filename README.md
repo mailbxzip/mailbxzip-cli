@@ -205,6 +205,32 @@ celle qui nomme les fichiers.
 trash = 1       ; vers la corbeille — recommandé pour une première purge
 ```
 
+Pour savoir quelle corbeille sera choisie, ou en nommer une autre, commencez
+par **regarder les dossiers du compte** :
+
+```bash
+php cli.php folders ma-boite
+```
+
+```
++----------+-----------+------------------------+------------------------------------+---------------------+
+| Messages |           | Nom (pour trash)       | Chemin IMAP                        | Attributs           |
++----------+-----------+------------------------+------------------------------------+---------------------+
+| 4568     |           | INBOX                  |                                    | HasNoChildren       |
+| 305      |           | INBOX/Éléments envoyés | INBOX.&AMk-l&AOk-ments envoy&AOk-s | HasNoChildren       |
+| 12       | corbeille | INBOX/Corbeille        | INBOX.Corbeille                    | HasNoChildren Trash |
++----------+-----------+------------------------+------------------------------------+---------------------+
+```
+
+Les noms de dossiers voyagent encodés sur le réseau, donc impossibles à
+deviner de l'extérieur : la commande montre le nom lisible **et** l'identifiant
+brut du serveur. `trash` accepte l'un comme l'autre, et `/` remplace le
+séparateur du serveur.
+
+```ini
+trash = "INBOX/Corbeille"
+```
+
 ```ini
 delete = 1      ; effacement définitif, sans filet
 ```
@@ -276,6 +302,7 @@ consulter si un message manque à l'appel.
 
 ```bash
 php cli.php mailbox --start <config>    # lance ou reprend un export
+php cli.php folders <config>            # liste les dossiers, repère la corbeille
 php cli.php list                        # liste les commandes
 php cli.php help config                 # format du fichier de configuration
 ```
