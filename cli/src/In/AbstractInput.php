@@ -35,6 +35,7 @@ abstract class AbstractInput implements InputHandlerInterface {
      */
     public const TRASH_CONFIG_VAR = [
         'trash' => 'with delete = 1: "1" moves the archived messages to the server trash instead of erasing them, or name the folder to move them to',
+        'trash_mode' => '"auto" (default) relocates with MOVE, or COPY when the server has no MOVE; "append" erases each message then puts it back in the trash, the only order a mailbox out of room accepts',
     ];
 
     protected $config;
@@ -50,6 +51,10 @@ abstract class AbstractInput implements InputHandlerInterface {
     public function __construct($config, Mailbox $mailbox = null) {
         $this->config = $config;
         $this->mailbox = $mailbox;
+
+        // Checked now rather than at purge time: a typo would otherwise only
+        // surface once the whole archive had been built.
+        $this->trashMode();
     }
 
     /**
@@ -124,6 +129,26 @@ abstract class AbstractInput implements InputHandlerInterface {
         }
 
         return ['enabled' => true, 'folder' => ($value === '1') ? null : $value];
+    }
+
+    /**
+     * How the messages should reach the trash.
+     *
+     * @return string 'auto' or 'append'.
+     * @throws RuntimeException On an unknown value.
+     */
+    protected function trashMode(): string {
+        $mode = strtolower(trim((string) ($this->config['trash_mode'] ?? 'auto')));
+
+        if ($mode === '') {
+            return 'auto';
+        }
+
+        if (!in_array($mode, ['auto', 'append'], true)) {
+            throw new RuntimeException("Unknown trash_mode '$mode'. Use \"auto\" or \"append\".");
+        }
+
+        return $mode;
     }
 
     /**

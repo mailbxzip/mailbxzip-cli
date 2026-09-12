@@ -101,7 +101,8 @@ class Handler(socketserver.StreamRequestHandler):
                 # what leaves a client staring at an empty response.
                 return
 
-            parts = raw.decode(errors="replace").strip().split(" ")
+            line = raw.decode(errors="replace").rstrip("\r\n")
+            parts = line.strip().split(" ")
             if len(parts) < 2:
                 continue
 
@@ -133,6 +134,8 @@ class Handler(socketserver.StreamRequestHandler):
                 self.fetch(tag, args[1], " ".join(args[2:]))
             elif command == "UID" and args and args[0].upper() == "STORE":
                 self.store(tag, args[1], " ".join(args[2:]))
+            elif command == "APPEND":
+                self.append(tag, line)
             elif command == "UID" and args and args[0].upper() == "MOVE":
                 self.move(tag, args[1], self.unquote(" ".join(args[2:])))
             elif command == "UID" and args and args[0].upper() == "COPY":
@@ -217,6 +220,39 @@ class Handler(socketserver.StreamRequestHandler):
             MAILBOX[destination][new_uid] = source[uid]
 
         self.send(f"{tag} OK COPY completed")
+
+    def append(self, tag, line):
+        """APPEND sends its payload as a literal: announce the size, wait for
+        a continuation, then write the bytes."""
+        size = re.search(r"\{(\d+)\}\s*$", line)
+        destination = re.search(r'APPEND\s+"([^"]+)"', line, re.I)
+
+        if not size or not destination:
+            self.send(f"{tag} BAD malformed APPEND")
+            return
+
+        self.wfile.write(b"+ ready for literal\r\n")
+        self.wfile.flush()
+
+        payload = self.rfile.read(int(size.group(1)))
+        self.rfile.readline()                       # the CRLF closing the line
+
+        destination = destination.group(1)
+
+        if REFUSE_COPY:
+            self.send(f"{tag} NO [OVERQUOTA] Quota exceeded on {destination}")
+            return
+
+        if destination not in MAILBOX:
+            self.send(f"{tag} NO [TRYCREATE] mailbox does not exist")
+            return
+
+        text = payload.decode(errors="replace")
+        header, _, body = text.partition("\r\n\r\n")
+        new_uid = max(MAILBOX[destination] or [1000]) + 1
+        MAILBOX[destination][new_uid] = (header + "\r\n", body)
+
+        self.send(f"{tag} OK [APPENDUID 1 {new_uid}] APPEND completed")
 
     def move(self, tag, sequence, destination):
         """MOVE: relocate, so the source keeps no copy and no extra room is

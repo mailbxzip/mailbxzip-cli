@@ -137,6 +137,7 @@ Plus `username` et `password` dans les deux cas.
 | `before` | N'archiver que les messages envoyés **strictement avant** cette date. Accepte le relatif : `-2 years`. |
 | `delete` | `1` **efface** de la source les messages archivés. **Destructif.** |
 | `trash` | `1` **déplace** les messages archivés vers la corbeille, ou nommez le dossier. Se suffit à lui-même. |
+| `trash_mode` | `auto` (défaut) ou `append`. `append` efface puis redépose chaque message : lent, mais seul mode qui passe sur une boîte à son quota. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `debugHtml` | `1` conserve le HTML intermédiaire à côté de chaque PDF. |
 | `archives_dir` / `tmp_dir` | Déplacent les répertoires de travail. |
@@ -245,6 +246,12 @@ Quatre conditions doivent être réunies pour qu'un message disparaisse :
 3. le format de sortie se porte garant de son archive — un essai à blanc, par
    exemple, ne l'autorise pas ;
 4. **l'archive ZIP existe** — sinon la purge est abandonnée et journalisée.
+
+Sur une **boîte pleine**, le déplacement échoue : il demande au serveur de
+détenir le message deux fois. `trash_mode = "append"` inverse l'ordre — lire,
+effacer, redéposer — et passe là où `MOVE` et `COPY` sont refusés. Lisez
+[ses contreparties](examples/README.md#quand-la-boîte-est-pleine) avant de
+l'activer.
 
 La suppression est la **toute dernière étape** de l'export et ne porte que sur
 les messages effectivement archivés. Avec `trash`, une corbeille introuvable

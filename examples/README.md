@@ -224,6 +224,40 @@ Si la corbeille retenue refuse les messages, **la purge s'arrête net** au
 premier refus, avec les mots du serveur : elle sert tous les dossiers, insister
 ne ferait qu'empiler la même erreur.
 
+### Quand la boîte est pleine
+
+Déplacer un message demande normalement au serveur de le détenir deux fois,
+ne serait-ce qu'un instant : `MOVE` l'évite, mais tous les serveurs ne le
+proposent pas, et `COPY` l'impose. Une boîte arrivée à son quota refuse donc
+le déplacement — précisément la situation où l'on archive.
+
+```ini
+trash      = 1
+trash_mode = "append"
+```
+
+Ce mode inverse l'ordre : chaque message est **lu, effacé, puis redéposé**
+dans la corbeille. C'est l'effacement qui libère la place dont le dépôt a
+besoin, donc la seule séquence qu'une boîte saturée accepte.
+
+**Ce qu'il en coûte, à lire avant de l'activer :**
+
+- **C'est lent.** Un message à la fois, quatre échanges chacun. Comptez une
+  dizaine de minutes pour quelques milliers de messages.
+- **Une fenêtre d'un message.** Entre l'effacement et le dépôt, l'e-mail n'est
+  plus sur le serveur et pas encore dans la corbeille. Il n'est jamais perdu :
+  la purge ne démarre qu'une fois l'archive ZIP écrite, il est donc sur disque
+  pendant tout ce temps.
+- **Un dépôt refusé arrête tout**, et le journal nomme le message concerné :
+  celui-là ne sera que dans l'archive. Un seul, jamais davantage.
+- Le message est redéposé **marqué comme lu**, avec sa date d'origine — sans
+  quoi la corbeille afficherait des milliers de non-lus datés d'aujourd'hui.
+
+> **La corbeille ne libère pas d'espace.** Elle compte dans le quota sur la
+> plupart des serveurs : c'est en la vidant que vous récupérerez la place.
+> Si l'archive vous suffit comme filet, `delete = 1` efface directement,
+> n'exige aucune place libre, et va bien plus vite.
+
 > Sur le connecteur déprécié `ImapLegacy`, la détection ne peut pas s'appuyer
 > sur `\Trash` et se limite aux noms usuels. Nommez la corbeille explicitement.
 
@@ -272,7 +306,8 @@ Plus `username` et `password` dans les deux cas.
 | `before` | N'archiver que les messages envoyés **strictement avant** cette date. Accepte le relatif : `-2 years`, `-18 months`. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `delete` | `1` supprime de la source les messages archivés. **Destructif.** |
-| `trash` | Avec `delete = 1` : `1` déplace les messages vers la corbeille du serveur au lieu de les effacer, ou nommez le dossier (`"INBOX/Corbeille"`). |
+| `trash` | `1` déplace les messages archivés vers la corbeille au lieu de les effacer, ou nommez le dossier (`"INBOX/Corbeille"`). Se suffit à lui-même. |
+| `trash_mode` | `auto` (défaut) déplace avec `MOVE`, ou `COPY` à défaut. `append` efface puis redépose chaque message : plus lent, mais seul mode qui passe sur une boîte pleine. |
 | `debugHtml` | `1` conserve le HTML intermédiaire à côté de chaque PDF, pour investiguer une mise en page. |
 | `archives_dir` / `tmp_dir` | Déplacent les répertoires de travail. |
 

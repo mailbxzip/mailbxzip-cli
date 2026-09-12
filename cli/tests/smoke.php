@@ -718,6 +718,10 @@ fails('source unable to delete is refused', function () use ($dir) {
 
 // Asking for the trash is asking for the messages to leave: no delete key
 // should be needed, and the guards must still apply.
+fails('an unknown trash_mode is refused', function () use ($dir) {
+    new \Mailbxzip\Cli\In\Test(['address' => 'a@b.c', 'trash_mode' => 'teleport']);
+}, "Unknown trash_mode 'teleport'");
+
 fails('trash alone triggers the guards', function () use ($dir) {
     (new Mailbox(writeConfig($dir, 'Test', 'Eml', ['trash' => 1]), $dir))->start();
 }, "'trash' was asked for");
@@ -899,6 +903,118 @@ if (is_resource($noMoveProcess)) {
     gc_collect_cycles();
     proc_terminate($noMoveProcess);
     proc_close($noMoveProcess);
+}
+
+// -------------------------------------------------------- erase-then-append ---
+$appendPort = 0;
+$appendProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+if ($appendProbe) {
+    $name = stream_socket_get_name($appendProbe, false);
+    $appendPort = (int) substr($name, strrpos($name, ':') + 1);
+    fclose($appendProbe);
+}
+
+$appendProcess = @proc_open(
+    'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $appendPort --no-move",
+    [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $appendPipes
+);
+
+if (is_resource($appendProcess)) {
+    stream_set_timeout($appendPipes[1], 5);
+    fgets($appendPipes[1]);
+
+    echo "\ntrash_mode = append — works where neither MOVE nor COPY can\n";
+
+    $server = ['server' => '{127.0.0.1:'.$appendPort.'/imap/notls}', 'username' => 'u', 'password' => 'p'];
+    $connect = function (array $extra = []) use ($appendPort) {
+        return new \Mailbxzip\Cli\In\Imap([
+            'address' => 'test@mailbxzip.com',
+            'host' => '127.0.0.1', 'port' => $appendPort, 'encryption' => 'none',
+            'username' => 'u', 'password' => 'p',
+        ] + $extra);
+    };
+
+    $dir = workingDir('trash-append');
+    $cleanup[] = $dir;
+    $archive = $dir.'/archives/test@mailbxzip.com';
+
+    $appended = new Mailbox(writeConfig($dir, 'Imap', 'Eml', $server + [
+        'trash' => 1, 'trash_mode' => 'append',
+    ]), $dir);
+    $appended->start();
+
+    $log = file_get_contents($archive.'/export.log');
+    $after = $connect()->getEmails();
+
+    check('the order is announced', str_contains($log, 'read, erased, then put back'));
+    check('folders emptied', count($after['INBOX'] ?? []) === 0);
+    check('everything reached the trash', count($after['INBOX.Trash'] ?? []) === 5);
+
+    // The message must arrive whole, and dated as it was, not as if it had
+    // just been received.
+    $trashed = $connect()->getEmail(end($after['INBOX.Trash']), 'INBOX.Trash')->get();
+    check('the message arrives intact', $trashed['subject'] === 'Re: proposition' && str_contains($trashed['body'], 'Bien recu'));
+    check('its original date is kept', str_contains($trashed['date'], '16 Jan 2024'));
+
+    unset($appended);
+    gc_collect_cycles();
+    proc_terminate($appendProcess);
+    proc_close($appendProcess);
+}
+
+// ------------------------------------------------- append refused after erase ---
+$lossPort = 0;
+$lossProbe = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+
+if ($lossProbe) {
+    $name = stream_socket_get_name($lossProbe, false);
+    $lossPort = (int) substr($name, strrpos($name, ':') + 1);
+    fclose($lossProbe);
+}
+
+$lossProcess = @proc_open(
+    'python3 '.escapeshellarg(__DIR__.'/fake-imap-server.py')." $lossPort --no-move --refuse-copy",
+    [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+    $lossPipes
+);
+
+if (is_resource($lossProcess)) {
+    stream_set_timeout($lossPipes[1], 5);
+    fgets($lossPipes[1]);
+
+    echo "\nAppend refused — the window costs one message, loudly\n";
+
+    $dir = workingDir('append-refused');
+    $cleanup[] = $dir;
+    $archive = $dir.'/archives/test@mailbxzip.com';
+
+    $lost = new Mailbox(writeConfig($dir, 'Imap', 'Eml', [
+        'server' => '{127.0.0.1:'.$lossPort.'/imap/notls}',
+        'username' => 'u', 'password' => 'p', 'trash' => 1, 'trash_mode' => 'append',
+    ]), $dir);
+    $lost->start();
+
+    $log = file_get_contents($archive.'/export.log');
+    $after = (new \Mailbxzip\Cli\In\Imap([
+        'address' => 'test@mailbxzip.com',
+        'host' => '127.0.0.1', 'port' => $lossPort, 'encryption' => 'none',
+        'username' => 'u', 'password' => 'p',
+    ]))->getEmails();
+
+    // Erasing first is what frees the room, so a refused append leaves that
+    // one message off the server. It has to stop there, and say so.
+    check('the purge stops at the first refusal', count($after['INBOX'] ?? []) === 3);
+    check('the affected message is named', str_contains($log, 'e-mail 101 of folder'));
+    check('it is said to survive in the archive', str_contains($log, 'survives in the zip archive'));
+    check('the archive really holds it', count(glob($archive.'/INBOX/*.eml')) === 4);
+    check('nothing claimed as purged', !is_file($archive.'/purged_emails.json'));
+
+    unset($lost);
+    gc_collect_cycles();
+    proc_terminate($lossProcess);
+    proc_close($lossProcess);
 }
 
 // ------------------------------------------------------------ guessed trash ---

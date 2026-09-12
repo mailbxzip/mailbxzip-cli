@@ -247,10 +247,24 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         $connection = $this->client->getConnection();
         $connection->selectFolder($folder);
 
+        return new Eml(
+            $this->rawMessage($connection, $id, $folder),
+            $this->folderNameFor($folder),
+            $id,
+            $this->config['address'] ?? null
+        );
+    }
+
+    /**
+     * Read one message as it stands on the server, header and body.
+     *
+     * The caller has already selected the folder.
+     */
+    private function rawMessage($connection, $id, string $folder): string {
         $header = $this->fetch($connection->headers([(int) $id], 'RFC822', Protocol::ST_UID), $id, $folder, 'header');
         $body = $this->fetch($connection->content([(int) $id], 'RFC822', Protocol::ST_UID), $id, $folder, 'body');
 
-        return new Eml($header.$body, $this->folderNameFor($folder), $id, $this->config['address'] ?? null);
+        return $header.$body;
     }
 
     /**
@@ -311,6 +325,13 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
             $original[(int) $id] = $id;
         }
 
+        // Erase each message then put it back in the trash. The only order a
+        // mailbox with no room left will accept, since neither MOVE nor COPY
+        // is on offer.
+        if ($moving && $this->trashMode() === 'append') {
+            return $this->relocateByAppend($connection, $original, $folder, $target);
+        }
+
         // MOVE relocates a message; COPY duplicates it and only then is the
         // original erased. On a mailbox that is short of room -- the very
         // reason one archives -- the copy is refused and nothing moves.
@@ -358,6 +379,128 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         }
 
         return $removed;
+    }
+
+    /**
+     * Relocate messages by erasing them first and putting them back after.
+     *
+     * MOVE and COPY both need the server to hold the message twice, if only
+     * for an instant, which a mailbox at its quota refuses. Reversing the
+     * order works because erasing is what frees the room the append needs.
+     *
+     * The price is a window, one message wide, where the e-mail is gone from
+     * the server and not yet in the trash. It is never lost: the purge only
+     * runs once the zip archive exists, so the message is on disk throughout.
+     * An append that fails stops everything and names the message concerned.
+     *
+     * @param array<int,int|string> $original uid => identifier as given
+     * @return array<int|string> The identifiers actually relocated.
+     */
+    private function relocateByAppend($connection, array $original, string $folder, string $target): array {
+        $name = $this->folderNameFor($target);
+        $total = count($original);
+
+        $this->log(
+            "moving $total e-mail(s) of folder ".$this->folderNameFor($folder)." to '$name' one at a time: "
+            .'each is read, erased, then put back. Slow, but the only order a mailbox out of room accepts.'
+        );
+
+        $removed = [];
+
+        foreach ($original as $uid => $id) {
+            try {
+                $raw = $this->rawMessage($connection, $uid, $folder);
+            } catch (Throwable $e) {
+                $this->log("e-mail $uid of folder $folder could not be read, it stays where it is: ".$e->getMessage(), 'ERROR');
+                continue;
+            }
+
+            if (!$this->eraseOne($connection, $uid, $folder)) {
+                continue;
+            }
+
+            // Past this point the message is off the server; only the archive
+            // holds it until the append lands.
+            $this->appendOne($connection, $target, $raw, $uid, $folder);
+
+            $removed[] = $id;
+
+            if (count($removed) % 100 === 0) {
+                $this->log('... '.count($removed)."/$total moved to '$name'");
+            }
+        }
+
+        return $removed;
+    }
+
+    /**
+     * Flag one message deleted and expunge, which is what frees the room.
+     *
+     * @return bool Whether the message really went.
+     */
+    private function eraseOne($connection, $uid, string $folder): bool {
+        try {
+            $flagged = $connection->store(['\\Deleted'], (int) $uid, (int) $uid, '+FLAGS', true, Protocol::ST_UID);
+
+            if (!$flagged->successful()) {
+                $this->log("e-mail $uid of folder $folder could not be flagged for deletion, it stays where it is", 'ERROR');
+
+                return false;
+            }
+
+            $connection->expunge();
+
+            return true;
+        } catch (Throwable $e) {
+            $this->log("e-mail $uid of folder $folder could not be erased, it stays where it is: ".$e->getMessage(), 'ERROR');
+
+            return false;
+        }
+    }
+
+    /**
+     * Put a message back into the trash.
+     *
+     * @throws TrashUnavailableException If it will not go, since the message
+     *         is already off the server and every later one would fare the
+     *         same.
+     */
+    private function appendOne($connection, string $target, string $raw, $uid, string $folder): void {
+        try {
+            // Marked as read: thousands of unread messages landing in the
+            // trash would drown the mailbox in notifications.
+            $appended = $connection->appendMessage($target, $raw, ['\\Seen'], $this->internalDate($raw));
+
+            if ($appended->successful()) {
+                return;
+            }
+
+            $detail = $this->serverSaid($appended);
+        } catch (Throwable $e) {
+            $detail = trim($e->getMessage());
+        }
+
+        throw new TrashUnavailableException(
+            "e-mail $uid of folder '".$this->folderNameFor($folder)."' was erased from the server but could NOT be put "
+            ."into the trash '".$this->folderNameFor($target)."'. It survives in the zip archive, and only there. "
+            .'Server said: '.($detail === '' ? '(no detail)' : $detail).'. The purge stops here.'
+        );
+    }
+
+    /**
+     * The date to give the message in the trash, taken from its own headers
+     * so it does not surface as if it had just arrived.
+     */
+    private function internalDate(string $raw): ?string {
+        if (!preg_match('/^Date:\s*(.+)$/mi', $raw, $matches)) {
+            return null;
+        }
+
+        try {
+            return (new \DateTimeImmutable(trim($matches[1])))->format('d-M-Y H:i:s O');
+        } catch (Throwable $e) {
+            return null;
+        }
     }
 
     /**
