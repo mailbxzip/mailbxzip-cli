@@ -380,6 +380,93 @@ fails('empty window is reported', function () use ($make) {
     $make(['since' => '2025-01-01', 'before' => '2024-01-01'])->getEmails();
 }, 'must be earlier than');
 
+// ---------------------------------------------------------- folder filter ---
+echo "\nFolder filter — take only the folders asked for\n";
+
+$folders = function (array $extra) {
+    return (new \Mailbxzip\Cli\In\Test(array_merge(['address' => 'test@mailbxzip.com'], $extra)))->getFolders();
+};
+
+check('no filter takes everything', $folders([])['folders'] !== [] && count($folders([])['folders']) === 6);
+check('one folder', array_keys($folders(['folders' => 'INBOX/Archives'])['folders']) === ['INBOX/Archives']);
+check('several folders', count($folders(['folders' => 'INBOX/Archives, INBOX/Brouillons'])['folders']) === 2);
+check('matching ignores case', array_keys($folders(['folders' => 'inbox/archives'])['folders']) === ['INBOX/Archives']);
+check('an unknown folder takes nothing', $folders(['folders' => 'Nexistepas'])['folders'] === []);
+check('spacing and stray slashes forgiven', count($folders(['folders' => ' /INBOX/Archives/ '])['folders']) === 1);
+
+// Naming a folder takes its sub-folders: what someone writing "INBOX" means.
+check('a parent takes its children', count($folders(['folders' => 'INBOX'])['folders']) === 6);
+
+// The filters narrow one another rather than compete.
+$narrowed = $folders(['folders' => 'INBOX/Archives', 'from' => 'dup@example.org']);
+check('folder and sender combine', $narrowed['total'] === 2);
+
+// A typo used to archive nothing at all, in silence, looking exactly like an
+// empty mailbox.
+$reported = function (array $extra) {
+    $dir = workingDir('folders-'.substr(md5(serialize($extra)), 0, 6));
+    (new Mailbox(writeConfig($dir, 'Test', 'Eml', $extra), $dir))->start();
+    $log = file_get_contents($dir.'/archives/test@mailbxzip.com/export.log');
+    rmrf($dir);
+
+    return $log;
+};
+
+$partly = $reported(['folders' => 'INBOX/Archives, Nexistepas']);
+check('an unknown folder is named', str_contains($partly, 'no folder matches "Nexistepas"'));
+check('the real folders are listed alongside', str_contains($partly, '"INBOX/Archives"'));
+check('the listing command is pointed to', str_contains($partly, 'php cli.php folders'));
+check('a partial match is only a warning', !str_contains($partly, '[ERROR]'));
+check('and the folders that do exist are still archived', str_contains($partly, 'Total emails to save: 4'));
+
+$none = $reported(['folders' => 'Nexistepas']);
+check('matching nothing at all is an error', str_contains($none, "[ERROR] the 'folders' entry matches nothing"));
+
+check('nothing is reported without the entry', !str_contains($reported([]), 'no folder matches'));
+check('nothing is reported when every name is right', !str_contains($reported(['folders' => 'INBOX']), 'no folder matches'));
+
+// ---------------------------------------------------------- sender filter ---
+echo "\nSender filter — independent of the date window\n";
+
+$sender = function (array $extra) {
+    return new \Mailbxzip\Cli\In\Test(array_merge(['address' => 'test@mailbxzip.com'], $extra));
+};
+$count = function ($connector) {
+    return array_sum(array_map('count', $connector->getEmails()));
+};
+
+check('one sender', $count($sender(['from' => 'dup@example.org'])) === 2);
+check('several senders, any one is enough', $count($sender(['from' => 'dup@example.org, accents@example.org'])) === 3);
+check('spacing around the commas is forgiven', $count($sender(['from' => ' dup@example.org ,accents@example.org '])) === 3);
+check('a substring is enough, as IMAP does it', $count($sender(['from' => 'example.org'])) === 6);
+check('matching ignores case', $count($sender(['from' => 'DUP@Example.ORG'])) === 2);
+check('an unknown sender selects nothing', $count($sender(['from' => 'personne@nulle.part'])) === 0);
+check('an empty entry filters nothing', $count($sender(['from' => '  '])) === 9);
+
+// The two filters narrow each other rather than compete: a sender across
+// every year, or a single year of that sender.
+check('sender alone spans every year', $count($sender(['from' => 'dup@example.org'])) === 2);
+check('sender and window combine', $count($sender(['from' => 'dup@example.org', 'since' => '2024-02-01', 'before' => '2024-02-02'])) === 2);
+check('a window that excludes the sender yields nothing', $count($sender(['from' => 'dup@example.org', 'before' => '2024-01-01'])) === 0);
+
+// IMAP writes alternatives in prefix form: OR takes two keys, so a third is
+// reached by nesting.
+$criteria = new ReflectionMethod('Mailbxzip\\Cli\\In\\Imap', 'senderCriteria');
+$criteria->setAccessible(true);
+$build = function (string $from) use ($criteria) {
+    $connector = (new ReflectionClass('Mailbxzip\\Cli\\In\\Imap'))->newInstanceWithoutConstructor();
+    $config = new ReflectionProperty($connector, 'config');
+    $config->setAccessible(true);
+    $config->setValue($connector, ['from' => $from]);
+
+    return implode(' ', $criteria->invoke($connector));
+};
+
+check('one sender needs no OR', $build('a@x.fr') === 'FROM "a@x.fr"');
+check('two senders take one OR', $build('a@x.fr, b@y.fr') === 'OR FROM "a@x.fr" FROM "b@y.fr"');
+check('three senders nest', $build('a@x.fr, b@y.fr, c@z.fr') === 'OR FROM "a@x.fr" OR FROM "b@y.fr" FROM "c@z.fr"');
+check('quotes in a sender are escaped', str_contains($build('a"b@x.fr'), '\\"'));
+
 // ------------------------------------------------------- legacy server string ---
 echo "\nImap — legacy ext-imap server strings still understood\n";
 
@@ -458,6 +545,16 @@ if (!$spawned && !@stream_socket_client("tcp://127.0.0.1:$imapPort", $errno, $er
     $filteredArchive = $dir.'/archives/test@mailbxzip.com';
 
     check('window applied server side', count(glob($filteredArchive.'/INBOX/*.eml')) === 2);
+
+    // The sender filter is pushed down too, and spans every year.
+    $bySender = (new \Mailbxzip\Cli\In\Imap([
+        'address' => 'test@mailbxzip.com',
+        'host' => '127.0.0.1', 'port' => $imapPort, 'encryption' => 'none',
+        'username' => 'u', 'password' => 'p', 'from' => 'example.org',
+    ]))->getEmails();
+
+    check('sender filtered by the server', array_sum(array_map('count', $bySender)) === 3);
+    check('and across every year', count($bySender['INBOX'] ?? []) === 3);
     check('older message left on the server', count(glob($filteredArchive.'/INBOX/2023-*.eml')) === 0);
     check('newer message left on the server', count(glob($filteredArchive.'/INBOX/2025-*.eml')) === 0);
     check('accented folder still exported', count(glob($filteredArchive.'/INBOX/Éléments envoyés/*.eml')) === 1);
@@ -675,6 +772,36 @@ if (isset($process) && is_resource($process)) {
     proc_terminate($process);
     proc_close($process);
 }
+
+// ------------------------------------------------------ single destination ---
+echo "\nOut into a single folder — the source tree is not mirrored\n";
+
+$dir = workingDir('into');
+$cleanup[] = $dir;
+(new Mailbox(writeConfig($dir, 'Test', 'Eml', ['into' => 'Archive 2024', 'wSource' => 1]), $dir))->start();
+$archive = $dir.'/archives/test@mailbxzip.com';
+
+check('only the named folder is created', array_values(array_diff(scandir($archive), ['.', '..', 'export.log', 'saved_emails.json'])) === ['Archive 2024']);
+check('every message lands there', count(glob($archive.'/Archive 2024/*.eml')) === 9);
+check('no source folder mirrored', !is_dir($archive.'/INBOX'));
+
+// Flattening brings messages from different folders together, so clashes
+// become likelier -- the uid suffix still settles them.
+check('collisions still settled', count(glob($archive.'/Archive 2024/2024-02-01-dup-*.eml')) === 2);
+
+// The raw sources follow, rather than scattering across a mirrored tree.
+check('kept sources follow the destination', count(glob($archive.'/Archive 2024/.eml/*.eml')) === 9);
+
+// Mbox gathers into a single mailbox file rather than one per folder.
+$dir = workingDir('into-mbox');
+$cleanup[] = $dir;
+(new Mailbox(writeConfig($dir, 'Test', 'Mbox', ['into' => 'Tout']), $dir))->start();
+$archive = $dir.'/archives/test@mailbxzip.com';
+
+check('one mbox for the whole export', count(glob($archive.'/Tout/email.mbox')) === 1);
+// One "From " separator per message: body lines starting that way are
+// quoted, so the count is exact.
+check('and it holds every message', preg_match_all('/^From /m', file_get_contents($archive.'/Tout/email.mbox')) === 9);
 
 // ---------------------------------------------------------------- Out/Html ---
 echo "\nOut/Html — browsable archive\n";
@@ -948,7 +1075,13 @@ if (is_resource($appendProcess)) {
     $log = file_get_contents($archive.'/export.log');
     $after = $connect()->getEmails();
 
+    check('the trash is probed first', str_contains($log, 'accepts messages'));
     check('the order is announced', str_contains($log, 'read, erased, then put back'));
+    // The probe must not survive its own success.
+    check('the probe leaves no trace', !str_contains(implode(' ', array_map(
+        fn ($u) => $connect()->getEmail($u, 'INBOX.Trash')->get()['subject'],
+        $after['INBOX.Trash'] ?? []
+    )), 'trash probe'));
     check('folders emptied', count($after['INBOX'] ?? []) === 0);
     check('everything reached the trash', count($after['INBOX.Trash'] ?? []) === 5);
 
@@ -984,7 +1117,7 @@ if (is_resource($lossProcess)) {
     stream_set_timeout($lossPipes[1], 5);
     fgets($lossPipes[1]);
 
-    echo "\nAppend refused — the window costs one message, loudly\n";
+    echo "\nAppend refused — found out before anything is erased\n";
 
     $dir = workingDir('append-refused');
     $cleanup[] = $dir;
@@ -1003,12 +1136,14 @@ if (is_resource($lossProcess)) {
         'username' => 'u', 'password' => 'p',
     ]))->getEmails();
 
-    // Erasing first is what frees the room, so a refused append leaves that
-    // one message off the server. It has to stop there, and say so.
-    check('the purge stops at the first refusal', count($after['INBOX'] ?? []) === 3);
-    check('the affected message is named', str_contains($log, 'e-mail 101 of folder'));
-    check('it is said to survive in the archive', str_contains($log, 'survives in the zip archive'));
-    check('the archive really holds it', count(glob($archive.'/INBOX/*.eml')) === 4);
+    // A probe goes first, so a trash that refuses everything costs nothing:
+    // finding out afterwards used to leave one message off the server, held
+    // only by the archive.
+    check('not a single message was erased', count($after['INBOX'] ?? []) === 4);
+    check('the probe is what was turned away', str_contains($log, 'turned away a test message'));
+    check("the server's words are relayed", str_contains($log, '[OVERQUOTA]'));
+    check('the ways out are spelled out', str_contains($log, 'delete = 1, which needs no room'));
+    check('the archive is untouched', count(glob($archive.'/INBOX/*.eml')) === 4);
     check('nothing claimed as purged', !is_file($archive.'/purged_emails.json'));
 
     unset($lost);

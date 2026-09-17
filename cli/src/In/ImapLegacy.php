@@ -34,7 +34,7 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface, Descr
         'password' => ''
     ];
 
-    public const CONFIG_VAR = self::DATE_CONFIG_VAR + self::TRASH_CONFIG_VAR;
+    public const CONFIG_VAR = self::FOLDER_CONFIG_VAR + self::DATE_CONFIG_VAR + self::SENDER_CONFIG_VAR + self::TRASH_CONFIG_VAR;
 
     /** This source can remove messages once they are archived. */
     public const CAN_DELETE = true;
@@ -86,6 +86,7 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface, Descr
         // Initialize an array to store the folder structure
         $folderStructure = [];
         $totalEmails = 0;
+        $available = [];
 
         // Iterate through each folder
         foreach ($folders as $folder) {
@@ -95,12 +96,21 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface, Descr
             // Get the number of emails in the folder
             $numEmails = imap_num_msg($this->imap);
 
+            $name = $this->normalizeFolderName($folder);
+            $available[] = $name;
+
+            if (!$this->keepsFolder($name)) {
+                continue;
+            }
+
             // Add the folder and the number of emails to the structure
-            $folderStructure[$this->normalizeFolderName($folder)] = $numEmails;
+            $folderStructure[$name] = $numEmails;
 
             // Add the number of emails to the total
             $totalEmails += $numEmails;
         }
+
+        $this->warnUnknownFolders($available);
 
         // Return the folder structure and the total number of emails
         return [
@@ -128,6 +138,10 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface, Descr
 
         // Iterate through each folder
         foreach ($folders as $folder) {
+            if (!$this->keepsFolder($this->normalizeFolderName($folder))) {
+                continue;
+            }
+
             // Select the folder (e.g., 'INBOX')
             imap_reopen($this->imap, $folder);
 
@@ -337,6 +351,22 @@ class ImapLegacy extends AbstractInput implements DeletableInputInterface, Descr
 
         if (!is_null($range['before'])) {
             $criteria[] = 'SENTBEFORE "'.$this->imapDate($range['before']).'"';
+        }
+
+        $senders = [];
+
+        foreach ($this->senders() as $sender) {
+            $senders[] = 'FROM "'.str_replace(['\\', '"'], ['\\\\', '\\"'], $sender).'"';
+        }
+
+        // Prefix form: OR takes two keys, so a third is reached by nesting.
+        while (count($senders) > 1) {
+            $last = array_pop($senders);
+            $senders[count($senders) - 1] = 'OR '.$senders[count($senders) - 1].' '.$last;
+        }
+
+        foreach ($senders as $term) {
+            $criteria[] = $term;
         }
 
         return $criteria === [] ? 'ALL' : implode(' ', $criteria);

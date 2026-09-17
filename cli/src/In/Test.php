@@ -24,7 +24,7 @@ class Test extends AbstractInput implements DescribesFoldersInterface {
         'In' => 'Test'
     ];
 
-    public const CONFIG_VAR = self::DATE_CONFIG_VAR;
+    public const CONFIG_VAR = self::FOLDER_CONFIG_VAR + self::DATE_CONFIG_VAR + self::SENDER_CONFIG_VAR;
 
     /** The fixture playing the part of a trash folder. */
     private const TRASH_FOLDER = 'INBOX/Corbeille';
@@ -38,12 +38,23 @@ class Test extends AbstractInput implements DescribesFoldersInterface {
         $folders = [];
         $total = 0;
 
+        $available = [];
+
         foreach ($this->messages() as $folder => $messages) {
+            $name = $this->folderName($folder);
+            $available[] = $name;
+
+            if (!$this->keepsFolder($name)) {
+                continue;
+            }
+
             $kept = count($this->selected($messages));
 
-            $folders[$this->folderName($folder)] = $kept;
+            $folders[$name] = $kept;
             $total += $kept;
         }
+
+        $this->warnUnknownFolders($available);
 
         return [
             'folders' => $folders,
@@ -58,6 +69,10 @@ class Test extends AbstractInput implements DescribesFoldersInterface {
         $emails = [];
 
         foreach ($this->messages() as $folder => $messages) {
+            if (!$this->keepsFolder($this->folderName($folder))) {
+                continue;
+            }
+
             $emails[$folder] = array_keys($this->selected($messages));
         }
 
@@ -108,15 +123,26 @@ class Test extends AbstractInput implements DescribesFoldersInterface {
      * @return array<int,string>
      */
     private function selected(array $messages): array {
-        if (!$this->hasDateFilter()) {
+        if (!$this->hasDateFilter() && !$this->hasSenderFilter()) {
             return $messages;
         }
 
         return array_filter($messages, function (string $raw): bool {
-            preg_match('/^Date:\s*(.+)$/mi', $raw, $matches);
+            // Both narrow the selection, so a sender can be taken across
+            // every year, or one year of one sender.
+            if ($this->hasSenderFilter() && !$this->matchesSender($this->header($raw, 'From'))) {
+                return false;
+            }
 
-            return $this->withinDateRange($matches[1] ?? '');
+            return !$this->hasDateFilter() || $this->withinDateRange($this->header($raw, 'Date'));
         });
+    }
+
+    /**
+     * Read one header out of a raw message.
+     */
+    private function header(string $raw, string $name): string {
+        return preg_match('/^'.preg_quote($name, '/').':\s*(.+)$/mi', $raw, $matches) ? trim($matches[1]) : '';
     }
 
     /**

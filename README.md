@@ -135,6 +135,9 @@ Plus `username` et `password` dans les deux cas.
 |---|---|
 | `since` | N'archiver que les messages envoyés **à partir de** cette date, incluse. |
 | `before` | N'archiver que les messages envoyés **strictement avant** cette date. Accepte le relatif : `-2 years`. |
+| `from` | N'archiver que les messages dont l'en-tête `From` contient ceci. Plusieurs séparées par des virgules, l'une suffit. |
+| `folders` | N'archiver que ces dossiers. Nommer un dossier prend aussi ses sous-dossiers. |
+| `into` | Tout écrire dans **ce seul dossier**, au lieu de reproduire l'arborescence de la source. |
 | `delete` | `1` **efface** de la source les messages archivés. **Destructif.** |
 | `trash` | `1` **déplace** les messages archivés vers la corbeille, ou nommez le dossier. Se suffit à lui-même. |
 | `trash_mode` | `auto` (défaut) ou `append`. `append` efface puis redépose chaque message : lent, mais seul mode qui passe sur une boîte à son quota. |
@@ -177,6 +180,49 @@ interchangeables par configuration.
 
 Ajouter un format revient à déposer une classe dans `cli/src/Out/` : voir
 [`MECANISME_IN_OUT.md`](MECANISME_IN_OUT.md).
+
+---
+
+## Choisir les dossiers
+
+```ini
+folders = "INBOX, INBOX/Clients"
+```
+
+N'archive que ces dossiers. Nommer un dossier **prend aussi ses sous-dossiers**,
+ce qu'on veut presque toujours en écrivant `INBOX`. La casse est indifférente.
+
+`php cli.php folders <config>` liste les noms valides. Un nom qui ne
+correspond à aucun dossier est **signalé au journal**, avec la liste de ceux
+qui existent — et si aucun ne correspond, c'est une erreur plutôt qu'un export
+vide en silence.
+
+À l'inverse, pour tout regrouper dans un seul dossier de destination plutôt que
+de reproduire l'arborescence :
+
+```ini
+into = "Archive 2024"
+```
+
+Les sources conservées par `wSource` suivent la destination, pour ne pas
+laisser deux arborescences différentes dans la même archive. Le regroupement
+rend les collisions de noms plus probables — elles restent réglées par le
+suffixe d'identifiant.
+
+---
+
+## Filtrer par expéditeur
+
+```ini
+from = "bulletin@exemple.fr, notifications@exemple.fr"
+```
+
+Sous-chaîne de l'en-tête `From`, sans tenir compte de la casse : une adresse,
+un domaine (`"@newsletter.fr"`) ou un nom affiché conviennent. Plusieurs
+valeurs séparées par des virgules, l'une suffit.
+
+Indépendant du filtre de dates : seul, il prend **toutes les années** ; combiné
+à `since`/`before`, les deux se restreignent mutuellement.
 
 ---
 

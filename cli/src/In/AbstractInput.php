@@ -30,6 +30,14 @@ abstract class AbstractInput implements InputHandlerInterface {
         'before' => 'only export messages sent strictly before this date (YYYY-MM-DD)',
     ];
 
+    public const FOLDER_CONFIG_VAR = [
+        'folders' => 'only export these folders, by the name "php cli.php folders" shows; several separated by commas; naming a folder takes its sub-folders too',
+    ];
+
+    public const SENDER_CONFIG_VAR = [
+        'from' => 'only export messages whose From header contains this, e.g. "bulletin@exemple.fr" or "Alice"; several separated by commas, any one of which is enough',
+    ];
+
     /**
      * Configuration entry understood by the connectors able to delete.
      */
@@ -43,6 +51,18 @@ abstract class AbstractInput implements InputHandlerInterface {
 
     /** @var array{since: ?DateTimeImmutable, before: ?DateTimeImmutable}|null */
     private $dateRange = null;
+
+    /** @var array<int,string>|null Senders the export is restricted to */
+    private $senders = null;
+
+    /** @var array<int,string>|null Folders the export is restricted to */
+    private $folderFilter = null;
+
+    /** @var array<string,bool> Filter entries that matched at least one folder */
+    private $matchedFolders = [];
+
+    /** @var bool Whether the unknown folders have already been reported */
+    private $reportedUnknownFolders = false;
 
     /**
      * @param array        $config  Configuration array.
@@ -129,6 +149,174 @@ abstract class AbstractInput implements InputHandlerInterface {
         }
 
         return ['enabled' => true, 'folder' => ($value === '1') ? null : $value];
+    }
+
+    /**
+     * The folders the export is restricted to.
+     *
+     * @return array<int,string> Empty when nothing is asked for.
+     */
+    protected function folderFilter(): array {
+        if (!is_null($this->folderFilter)) {
+            return $this->folderFilter;
+        }
+
+        $wanted = [];
+
+        foreach (explode(',', (string) ($this->config['folders'] ?? '')) as $folder) {
+            $folder = trim($folder, " \t\n\r\0\x0B/");
+
+            if ($folder !== '') {
+                $wanted[] = $folder;
+            }
+        }
+
+        return $this->folderFilter = $wanted;
+    }
+
+    /**
+     * Whether a folder is one of those asked for.
+     *
+     * Naming a folder takes its sub-folders with it, which is what an
+     * operator writing "INBOX" almost always means. Matching ignores case,
+     * like the rest of the filters.
+     */
+    protected function keepsFolder(string $name): bool {
+        $wanted = $this->folderFilter();
+
+        if ($wanted === []) {
+            return true;
+        }
+
+        $name = trim($name, '/');
+
+        foreach ($wanted as $folder) {
+            if (strcasecmp($name, $folder) === 0 || stripos($name, $folder.'/') === 0) {
+                // Remembered so an entry that never matches anything can be
+                // pointed out afterwards.
+                $this->matchedFolders[$folder] = true;
+
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Point out the folders that were asked for but do not exist.
+     *
+     * A typo in 'folders' otherwise archives nothing at all, in silence, and
+     * looks exactly like an empty mailbox. Called once the connector has seen
+     * every folder it has.
+     *
+     * @param array<int,string> $available Every folder name the source holds.
+     */
+    protected function warnUnknownFolders(array $available): void {
+        if ($this->reportedUnknownFolders || $this->folderFilter() === []) {
+            return;
+        }
+
+        $this->reportedUnknownFolders = true;
+
+        $unknown = array_values(array_diff($this->folderFilter(), array_keys($this->matchedFolders)));
+
+        if ($unknown !== []) {
+            $this->log(
+                'no folder matches '.$this->quoted($unknown).'. The source holds: '.$this->quoted($available, 12)
+                .'. Run "php cli.php folders <config>" to see them all.',
+                'WARNING'
+            );
+        }
+
+        if ($this->matchedFolders === []) {
+            $this->log(
+                "the 'folders' entry matches nothing at all, so this export would archive no message.",
+                'ERROR'
+            );
+        }
+    }
+
+    /**
+     * Render a list of names for a message, shortened when it runs long.
+     *
+     * @param array<int,string> $names
+     */
+    private function quoted(array $names, int $limit = 0): string {
+        if ($limit > 0 && count($names) > $limit) {
+            $names = array_slice($names, 0, $limit);
+            $names[] = '...';
+        }
+
+        return implode(', ', array_map(function ($name) {
+            return ($name === '...') ? $name : '"'.$name.'"';
+        }, $names));
+    }
+
+    /**
+     * The senders the export is restricted to.
+     *
+     * Independent of the date window: a sender may be archived across every
+     * year at once, or a single year of one sender, by setting both.
+     *
+     * @return array<int,string> Empty when nothing is asked for.
+     */
+    protected function senders(): array {
+        if (!is_null($this->senders)) {
+            return $this->senders;
+        }
+
+        $raw = (string) ($this->config['from'] ?? '');
+        $senders = [];
+
+        foreach (explode(',', $raw) as $sender) {
+            $sender = trim($sender);
+
+            if ($sender !== '') {
+                $senders[] = $sender;
+            }
+        }
+
+        return $this->senders = $senders;
+    }
+
+    /**
+     * Whether the export is restricted to given senders.
+     */
+    protected function hasSenderFilter(): bool {
+        return $this->senders() !== [];
+    }
+
+    /**
+     * Decide whether a raw From header names one of the wanted senders.
+     *
+     * A plain, case-insensitive substring match, the same thing IMAP's FROM
+     * criterion does, so a connector filtering on its own agrees with one
+     * letting the server do it. It therefore matches a display name as
+     * readily as an address.
+     */
+    protected function matchesSender($rawFrom): bool {
+        $senders = $this->senders();
+
+        if ($senders === []) {
+            return true;
+        }
+
+        $from = trim((string) $rawFrom);
+
+        if ($from === '') {
+            $this->log('a message carries no readable From header and falls outside the sender filter', 'WARNING');
+
+            return false;
+        }
+
+        foreach ($senders as $sender) {
+            if (mb_stripos($from, $sender) !== false) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**

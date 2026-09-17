@@ -19,6 +19,8 @@ use Throwable;
 class Mbox extends AbstractOutput {
     public const HELP = 'Export e-mails to Mbox format';
 
+    public const CONFIG_VAR = self::INTO_CONFIG_VAR;
+
     public const MINIMAL_CONFIG_VAR = [
         'out' => 'Mbox'
     ];
@@ -40,7 +42,7 @@ class Mbox extends AbstractOutput {
      * Get the mbox save path for an email.
      */
     private function savePath(\Mailbxzip\Cli\Eml $eml): string {
-        return $this->archivePath().'/'.$eml->getFolder().'/email.mbox';
+        return $this->archivePath().'/'.$this->destination($eml).'/email.mbox';
     }
 
     /**

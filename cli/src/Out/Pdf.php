@@ -20,7 +20,7 @@ class Pdf extends AbstractOutput {
         'out' => 'Pdf'
     ];
 
-    public const CONFIG_VAR = [
+    public const CONFIG_VAR = self::INTO_CONFIG_VAR + [
         'debugHtml' => '(1|0) store html source of pdf for debugging',
     ];
 
@@ -49,7 +49,7 @@ class Pdf extends AbstractOutput {
      * Get the PDF save path for an email.
      */
     private function pdfSavePath(\Mailbxzip\Cli\Eml $eml): string {
-        return $this->archivePath().'/'.$eml->getFolder().'/'.$eml->filename().'.pdf';
+        return $this->archivePath().'/'.$this->destination($eml).'/'.$eml->filename().'.pdf';
     }
 
     /**

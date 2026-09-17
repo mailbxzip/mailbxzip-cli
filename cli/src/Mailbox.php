@@ -797,7 +797,13 @@ class Mailbox {
      * @return string The source path.
      */
     private function sourcePath($eml) {
-        return $this->getConfig()['emailArchivePath'].'/'.$eml->getFolder().'/.eml/';
+        // Follows the output: gathering the messages into one folder and then
+        // scattering their sources across a mirrored tree would leave two
+        // different shapes in the same archive.
+        $into = trim((string) ($this->getConfig()['into'] ?? ''), " \t\n\r\0\x0B/");
+        $folder = ($into === '') ? $eml->getFolder() : $into;
+
+        return $this->getConfig()['emailArchivePath'].'/'.$folder.'/.eml/';
     }
 
     /**

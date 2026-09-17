@@ -18,6 +18,13 @@ use Throwable;
  */
 abstract class AbstractOutput implements OutputHandlerInterface {
 
+    /**
+     * Configuration entry every output connector understands.
+     */
+    public const INTO_CONFIG_VAR = [
+        'into' => 'write every message into this one folder instead of mirroring the source tree, e.g. into = "Archive 2024"',
+    ];
+
     protected $config;
     protected $mailbox;
 
@@ -60,12 +67,43 @@ abstract class AbstractOutput implements OutputHandlerInterface {
     /**
      * Create the archive directory tree.
      *
+     * Just the one directory when everything is being gathered into it: the
+     * source tree is then deliberately not reproduced.
+     *
      * @param array<string,int> $folders Folder name => message count.
      */
     public function setFolders(array $folders): void {
+        $into = $this->into();
+
+        if (!is_null($into)) {
+            $this->ensureDirectory($this->archivePath() . DIRECTORY_SEPARATOR . $into);
+
+            return;
+        }
+
         foreach ($folders as $folder => $nb) {
             $this->ensureDirectory($this->archivePath() . DIRECTORY_SEPARATOR . $folder);
         }
+    }
+
+    /**
+     * The single folder everything is to be gathered into, if any.
+     */
+    protected function into(): ?string {
+        $into = trim((string) ($this->getConfig()['into'] ?? ''), " \t\n\r\0\x0B/");
+
+        return ($into === '') ? null : $into;
+    }
+
+    /**
+     * Where a message belongs in the archive.
+     *
+     * The folder it came from, unless everything is being gathered into one.
+     * Flattening makes name clashes far likelier, which uniquePath() already
+     * settles by appending the source uid.
+     */
+    protected function destination(\Mailbxzip\Cli\Eml $eml): string {
+        return $this->into() ?? $eml->getFolder();
     }
 
     /**

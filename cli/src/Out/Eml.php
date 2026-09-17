@@ -13,6 +13,8 @@ use Throwable;
 class Eml extends AbstractOutput {
     public const HELP = 'Export e-mails to eml';
 
+    public const CONFIG_VAR = self::INTO_CONFIG_VAR;
+
     public const MINIMAL_CONFIG_VAR = [
         'out' => 'Eml'
     ];
@@ -34,6 +36,6 @@ class Eml extends AbstractOutput {
      * Get the .eml save path for an email.
      */
     private function savePath(\Mailbxzip\Cli\Eml $eml): string {
-        return $this->archivePath().'/'.$eml->getFolder().'/'.$eml->filename().'.eml';
+        return $this->archivePath().'/'.$this->destination($eml).'/'.$eml->filename().'.eml';
     }
 }

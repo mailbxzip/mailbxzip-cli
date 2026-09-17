@@ -32,6 +32,7 @@ compressée en `~/.config/mailbxzip/archives/<nom-de-la-config>.zip`.
 | [`archive-2-ans-html-purge.ini`](archive-2-ans-html-purge.ini) | Idem, **puis efface définitivement** les messages archivés. | **Oui, définitivement** |
 | [`archive-complete-pdf.ini`](archive-complete-pdf.ini) | Archive toute la boîte en PDF, pièces jointes embarquées. | Non |
 | [`archive-exercice-mbox.ini`](archive-exercice-mbox.ini) | Archive une année civile au format mbox réimportable. | Non |
+| [`archive-expediteur.ini`](archive-expediteur.ini) | Archive tout ce qu'a envoyé un expéditeur, **toutes années confondues**. | Non par défaut |
 
 ### `essai-hors-ligne.ini`
 
@@ -117,6 +118,37 @@ before = "2024-01-01"   ; exclue
 
 `since` est **inclusive**, `before` est **exclusive** : cet intervalle couvre
 donc exactement l'année 2023, du 1er janvier au 31 décembre.
+
+### `archive-expediteur.ini`
+
+Pour désengorger une boîte d'un bulletin ou d'un émetteur automatique :
+
+```ini
+from = "bulletin@exemple.fr"
+```
+
+Le filtre cherche une **sous-chaîne dans l'en-tête `From`, sans tenir compte
+de la casse** — exactement ce que fait le critère `FROM` d'IMAP. Une adresse
+complète, un domaine entier (`"@newsletter.fr"`) ou un nom affiché (`"Alice"`)
+conviennent donc aussi bien.
+
+Plusieurs expéditeurs se séparent par des virgules, et il suffit qu'un seul
+corresponde :
+
+```ini
+from = "bulletin@exemple.fr, notifications@exemple.fr"
+```
+
+Comme celui des dates, ce filtre est **poussé au serveur** : les messages
+écartés ne sont jamais téléchargés.
+
+Les deux filtres sont indépendants et se **restreignent mutuellement** :
+
+| Configuration | Ce qui est archivé |
+|---|---|
+| `from` seul | Cet expéditeur, **toutes années confondues** |
+| `before` seul | Tout le monde, au-delà de l'ancienneté indiquée |
+| les deux | Cet expéditeur, et seulement au-delà de cette ancienneté |
 
 ---
 
@@ -244,12 +276,16 @@ besoin, donc la seule séquence qu'une boîte saturée accepte.
 
 - **C'est lent.** Un message à la fois, quatre échanges chacun. Comptez une
   dizaine de minutes pour quelques milliers de messages.
+- **La corbeille est sondée d'abord.** Un message de test y est déposé puis
+  retiré, avant que quoi que ce soit ne soit effacé. Si elle le refuse, la
+  purge s'arrête sans avoir touché à un seul e-mail.
 - **Une fenêtre d'un message.** Entre l'effacement et le dépôt, l'e-mail n'est
   plus sur le serveur et pas encore dans la corbeille. Il n'est jamais perdu :
   la purge ne démarre qu'une fois l'archive ZIP écrite, il est donc sur disque
   pendant tout ce temps.
 - **Un dépôt refusé arrête tout**, et le journal nomme le message concerné :
-  celui-là ne sera que dans l'archive. Un seul, jamais davantage.
+  celui-là ne sera que dans l'archive. Un seul, jamais davantage — et le
+  sondage rend ce cas très improbable.
 - Le message est redéposé **marqué comme lu**, avec sa date d'origine — sans
   quoi la corbeille afficherait des milliers de non-lus datés d'aujourd'hui.
 
@@ -304,6 +340,9 @@ Plus `username` et `password` dans les deux cas.
 |---|---|
 | `since` | N'archiver que les messages envoyés **à partir de** cette date, incluse. |
 | `before` | N'archiver que les messages envoyés **strictement avant** cette date. Accepte le relatif : `-2 years`, `-18 months`. |
+| `from` | N'archiver que les messages dont l'en-tête `From` contient ceci. Plusieurs valeurs séparées par des virgules, l'une suffit. |
+| `folders` | N'archiver que ces dossiers ; nommer un dossier prend ses sous-dossiers. Plusieurs séparés par des virgules. Un nom inconnu est signalé au journal. |
+| `into` | Tout écrire dans ce seul dossier, au lieu de reproduire l'arborescence de la source. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `delete` | `1` supprime de la source les messages archivés. **Destructif.** |
 | `trash` | `1` déplace les messages archivés vers la corbeille au lieu de les effacer, ou nommez le dossier (`"INBOX/Corbeille"`). Se suffit à lui-même. |

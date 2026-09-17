@@ -52,7 +52,7 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         'password' => ''
     ];
 
-    public const CONFIG_VAR = self::DATE_CONFIG_VAR + self::TRASH_CONFIG_VAR + [
+    public const CONFIG_VAR = self::FOLDER_CONFIG_VAR + self::DATE_CONFIG_VAR + self::SENDER_CONFIG_VAR + self::TRASH_CONFIG_VAR + [
         'port' => 'server port, 993 by default',
         'encryption' => 'ssl (default), tls, starttls or none',
         'validate_cert' => '(1|0) verify the TLS certificate, 1 by default',
@@ -72,6 +72,9 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
 
     /** @var bool|null Whether the server implements MOVE, asked once */
     private $supportsMove = null;
+
+    /** @var array{flags: ?array, date: bool}|null The shape of APPEND the trash accepts */
+    private $appendForm = null;
 
     /**
      * @throws RuntimeException If the connection cannot be established.
@@ -173,12 +176,23 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         $structure = [];
         $total = 0;
 
+        $available = [];
+
         foreach ($this->client->getFolders(false) as $folder) {
+            $name = $this->folderNameFor($folder->path);
+            $available[] = $name;
+
+            if (!$this->keepsFolder($name)) {
+                continue;
+            }
+
             $count = (int) ($folder->examine()['exists'] ?? 0);
 
-            $structure[$this->folderNameFor($folder->path)] = $count;
+            $structure[$name] = $count;
             $total += $count;
         }
+
+        $this->warnUnknownFolders($available);
 
         return ['folders' => $structure, 'total' => $total];
     }
@@ -194,6 +208,10 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         $connection = $this->client->getConnection();
 
         foreach ($this->client->getFolders(false) as $folder) {
+            if (!$this->keepsFolder($this->folderNameFor($folder->path))) {
+                continue;
+            }
+
             $connection->selectFolder($folder->path);
 
             // Ask the server for uids only. Going through the query builder
@@ -236,7 +254,42 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
             $criteria[] = $this->imapDate($range['before']);
         }
 
+        // Keys written side by side are ANDed, so the senders narrow the date
+        // window rather than widen it -- and stand on their own when no
+        // window is set.
+        foreach ($this->senderCriteria() as $token) {
+            $criteria[] = $token;
+        }
+
         return $criteria === [] ? ['ALL'] : $criteria;
+    }
+
+    /**
+     * The FROM part of the search, any one sender being enough.
+     *
+     * IMAP writes alternatives in prefix form: two keys after each OR, so a
+     * third is reached by nesting -- OR a OR b c.
+     *
+     * @return array<int,string>
+     */
+    private function senderCriteria(): array {
+        $terms = [];
+
+        foreach ($this->senders() as $sender) {
+            $terms[] = ['FROM', '"'.str_replace(['\\', '"'], ['\\\\', '\\"'], $sender).'"'];
+        }
+
+        if ($terms === []) {
+            return [];
+        }
+
+        $criteria = array_pop($terms);
+
+        while ($terms !== []) {
+            $criteria = array_merge(['OR'], array_pop($terms), $criteria);
+        }
+
+        return $criteria;
     }
 
     /**
@@ -400,6 +453,14 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
         $name = $this->folderNameFor($target);
         $total = count($original);
 
+        // Ask the trash whether it will take anything at all, before a single
+        // message is erased. Finding out afterwards costs an e-mail: it is
+        // off the server and only the archive still holds it.
+        $form = $this->ensureTrashAccepts($connection, $target);
+
+        // The probe left us in the trash.
+        $connection->selectFolder($folder);
+
         $this->log(
             "moving $total e-mail(s) of folder ".$this->folderNameFor($folder)." to '$name' one at a time: "
             .'each is read, erased, then put back. Slow, but the only order a mailbox out of room accepts.'
@@ -421,7 +482,7 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
 
             // Past this point the message is off the server; only the archive
             // holds it until the append lands.
-            $this->appendOne($connection, $target, $raw, $uid, $folder);
+            $this->appendOne($connection, $target, $raw, $uid, $folder, $form);
 
             $removed[] = $id;
 
@@ -465,26 +526,162 @@ class Imap extends AbstractInput implements DeletableInputInterface, DescribesFo
      *         is already off the server and every later one would fare the
      *         same.
      */
-    private function appendOne($connection, string $target, string $raw, $uid, string $folder): void {
-        try {
-            // Marked as read: thousands of unread messages landing in the
-            // trash would drown the mailbox in notifications.
-            $appended = $connection->appendMessage($target, $raw, ['\\Seen'], $this->internalDate($raw));
+    private function appendOne($connection, string $target, string $raw, $uid, string $folder, array $form): void {
+        $attempt = $this->attemptAppend(
+            $connection,
+            $target,
+            $raw,
+            $form['flags'],
+            $form['date'] ? $this->internalDate($raw) : null
+        );
 
-            if ($appended->successful()) {
-                return;
-            }
-
-            $detail = $this->serverSaid($appended);
-        } catch (Throwable $e) {
-            $detail = trim($e->getMessage());
+        if ($attempt['ok']) {
+            return;
         }
+
+        $detail = $attempt['detail'];
 
         throw new TrashUnavailableException(
             "e-mail $uid of folder '".$this->folderNameFor($folder)."' was erased from the server but could NOT be put "
             ."into the trash '".$this->folderNameFor($target)."'. It survives in the zip archive, and only there. "
             .'Server said: '.($detail === '' ? '(no detail)' : $detail).'. The purge stops here.'
         );
+    }
+
+    /**
+     * Check the trash will take a message, and in which shape.
+     *
+     * A probe is appended and removed again. Servers differ on what they
+     * accept -- some balk at the internal date, some at the flags -- so the
+     * shapes are tried from richest to barest and the one that works is kept
+     * for the rest of the run.
+     *
+     * Crucially this happens before any message is erased: a trash that
+     * refuses everything is then found out at no cost.
+     *
+     * @return array{flags: ?array, date: bool}
+     * @throws TrashUnavailableException If nothing gets through.
+     */
+    private function ensureTrashAccepts($connection, string $target): array {
+        if (!is_null($this->appendForm)) {
+            return $this->appendForm;
+        }
+
+        $probe = $this->probeMessage();
+        $name = $this->folderNameFor($target);
+        $detail = '(no detail)';
+
+        $shapes = [
+            ['flags' => ['\\Seen'], 'date' => true],
+            ['flags' => ['\\Seen'], 'date' => false],
+            ['flags' => null, 'date' => false],
+        ];
+
+        foreach ($shapes as $shape) {
+            $attempt = $this->attemptAppend(
+                $connection,
+                $target,
+                $probe,
+                $shape['flags'],
+                $shape['date'] ? $this->internalDate($probe) : null
+            );
+
+            if ($attempt['ok']) {
+                $this->discardProbe($connection, $target, $attempt['uid']);
+
+                $this->log("the trash '$name' accepts messages"
+                    .($shape['date'] ? '' : ', but not an internal date')
+                    .(is_null($shape['flags']) ? ' and not flags' : ''));
+
+                return $this->appendForm = $shape;
+            }
+
+            $detail = $attempt['detail'];
+        }
+
+        throw new TrashUnavailableException(
+            "the trash '$name' turned away a test message, so it would turn away yours: nothing was erased. "
+            .'Server said: '.$detail.'. Free room on the account, name another folder with trash = "...", '
+            .'or drop trash and use delete = 1, which needs no room at all.'
+        );
+    }
+
+    /**
+     * Try one APPEND, reporting what came back rather than raising.
+     *
+     * @return array{ok: bool, detail: string, uid: ?int}
+     */
+    private function attemptAppend($connection, string $target, string $raw, ?array $flags, ?string $date): array {
+        try {
+            $response = $connection->appendMessage($target, $raw, $flags, $date);
+
+            if ($response->successful()) {
+                return ['ok' => true, 'detail' => '', 'uid' => $this->appendedUid($response)];
+            }
+
+            return ['ok' => false, 'detail' => $this->serverSaid($response), 'uid' => null];
+        } catch (Throwable $e) {
+            $detail = trim($e->getMessage());
+
+            return ['ok' => false, 'detail' => ($detail === '') ? '(no detail)' : $detail, 'uid' => null];
+        }
+    }
+
+    /**
+     * The uid the server gave the appended message, when it says so.
+     */
+    private function appendedUid($response): ?int {
+        foreach ((array) $response->getResponse() as $line) {
+            $line = is_array($line) ? implode(' ', array_map('strval', $line)) : (string) $line;
+
+            if (preg_match('/APPENDUID\s+\d+\s+(\d+)/i', $line, $matches)) {
+                return (int) $matches[1];
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Take the probe back out of the trash.
+     *
+     * Only when the server told us its uid: guessing would risk erasing a
+     * real message, which is never worth saving one test e-mail.
+     */
+    private function discardProbe($connection, string $target, ?int $uid): void {
+        if (is_null($uid)) {
+            $this->log("a test message was left in the trash '".$this->folderNameFor($target)."': the server did not say"
+                .' where it put it, and guessing could erase a real one. Subject: "mailbxzip trash probe".', 'WARNING');
+
+            return;
+        }
+
+        try {
+            $connection->selectFolder($target);
+            $connection->store(['\\Deleted'], $uid, $uid, '+FLAGS', true, Protocol::ST_UID);
+            $connection->expunge();
+        } catch (Throwable $e) {
+            $this->log('the test message could not be removed from the trash: '.$e->getMessage(), 'WARNING');
+        }
+    }
+
+    /**
+     * A minimal, unmistakable message to test the trash with.
+     */
+    private function probeMessage(): string {
+        $date = (new \DateTimeImmutable())->format('D, d M Y H:i:s O');
+
+        return implode("\r\n", [
+            'From: mailbxzip <mailbxzip@localhost>',
+            'To: mailbxzip <mailbxzip@localhost>',
+            'Subject: mailbxzip trash probe',
+            'Date: '.$date,
+            'Message-ID: <probe.'.bin2hex(random_bytes(8)).'@mailbxzip>',
+            'Content-Type: text/plain; charset=US-ASCII',
+            '',
+            'Written by mailbxzip to check this folder accepts messages. Safe to delete.',
+            '',
+        ]);
     }
 
     /**

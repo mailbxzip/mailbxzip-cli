@@ -20,6 +20,8 @@ use Throwable;
 class Html extends AbstractOutput {
     public const HELP = 'Export e-mails to a browsable set of HTML pages';
 
+    public const CONFIG_VAR = self::INTO_CONFIG_VAR;
+
     public const MINIMAL_CONFIG_VAR = [
         'out' => 'Html'
     ];
@@ -36,7 +38,7 @@ class Html extends AbstractOutput {
      */
     public function saveEmails(\Mailbxzip\Cli\Eml $eml): void {
         try {
-            $folder = $eml->getFolder();
+            $folder = $this->destination($eml);
             $path = $this->uniquePath($this->archivePath().'/'.$folder.'/'.$eml->filename().'.html', $eml);
             $name = basename($path, '.html');
 

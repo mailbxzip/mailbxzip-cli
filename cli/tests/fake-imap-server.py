@@ -150,10 +150,17 @@ class Handler(socketserver.StreamRequestHandler):
                 self.send(f"{tag} OK {command} ignored")
 
     def search(self, criteria):
-        """Support ALL plus the SENTSINCE / SENTBEFORE date criteria."""
+        """Support the criteria the connector actually builds: ALL, the
+        SENTSINCE / SENTBEFORE dates, and FROM terms taken as alternatives.
+
+        Not a general IMAP matcher: the OR tokens are skipped because every
+        FROM this client sends is an alternative to the others, and the dates
+        always narrow them.
+        """
         folder = MAILBOX.get(self.selected, {})
         tokens = [c.strip('"') for c in criteria]
         since = before = None
+        senders = []
 
         for index, token in enumerate(tokens):
             key = token.upper()
@@ -163,17 +170,31 @@ class Handler(socketserver.StreamRequestHandler):
                     since = bound
                 else:
                     before = bound
+            elif key == "FROM" and index + 1 < len(tokens):
+                senders.append(tokens[index + 1].lower())
 
         kept = []
         for uid in sorted(folder):
-            sent = self.sent_date(folder[uid][0])
+            header = folder[uid][0]
+            sent = self.sent_date(header)
             # SENTSINCE is inclusive, SENTBEFORE is exclusive.
             if since and (sent is None or sent < since):
                 continue
             if before and (sent is None or sent >= before):
                 continue
+            if senders and not self.from_matches(header, senders):
+                continue
             kept.append(uid)
         return kept
+
+    @staticmethod
+    def from_matches(header, senders):
+        """FROM is a substring match on the header, case-insensitive."""
+        match = re.search(r"^From:\s*(.+)$", header, re.MULTILINE | re.IGNORECASE)
+        if not match:
+            return False
+        value = match.group(1).lower()
+        return any(sender in value for sender in senders)
 
     @staticmethod
     def sent_date(header):
