@@ -24,13 +24,20 @@
         "symfony/lock": "^7.2",
         "twig/twig": "^3.0",
         "zbateson/mail-mime-parser": "^3.0",
-        "webklex/php-imap": "^6.2"
+        "webklex/php-imap": "^6.2",
+        "google/apiclient": "^2.18"
     },
     "scripts": {
         "test": "php tests/smoke.php",
-        "test-pdf": "php -d extension=gd tests/smoke.php"
+        "test-pdf": "php -d extension=gd tests/smoke.php",
+        "post-update-cmd": "Google\\Task\\Composer::cleanup"
     },
     "suggest": {
         "ext-imap": "Only needed by the deprecated In/ImapLegacy connector; the default In/Imap connector needs no extension"
+    },
+    "extra": {
+        "google/apiclient-services": [
+            "Gmail"
+        ]
     }
 }

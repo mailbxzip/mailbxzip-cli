@@ -13,8 +13,10 @@ use Symfony\Component\Console\Input\InputInterface;
 use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Helper\Table;
+use Symfony\Component\Console\Question\Question;
 use Symfony\Component\Console\Helper\TableSeparator;
 use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
+use Mailbxzip\Cli\In\Gmail;
 use Mailbxzip\Cli\Mailbox;
 
 $workingDir = getenv('HOME').'/.config/mailbxzip';
@@ -204,6 +206,91 @@ class FoldersCommand extends Command
     }
 }
 
+class GmailAuthCommand extends Command
+{
+    public function __construct()
+    {
+        parent::__construct('gmail-auth');
+    }
+
+    protected function configure()
+    {
+        $this
+            ->setDescription('Obtain the Gmail refresh token a configuration needs, once.')
+            ->setHelp(
+                "The Gmail API takes no password. Create an OAuth client of type\n"
+                ."\"Desktop app\" in a Google Cloud project, put its client_id and\n"
+                ."client_secret in the configuration, then run this command: it prints\n"
+                ."a link to authorise, takes the code back, and writes the refresh\n"
+                ."token into the configuration file. Done once per mailbox."
+            )
+            ->addArgument('email', InputArgument::REQUIRED, 'config filename');
+    }
+
+    protected function execute(InputInterface $input, OutputInterface $output): int
+    {
+        global $workingDir;
+
+        $file = $workingDir.'/config/'.$input->getArgument('email');
+
+        if (!is_file($file)) {
+            $output->writeln("<error>The configuration file '$file' does not exist.</error>");
+
+            return Command::FAILURE;
+        }
+
+        $config = parse_ini_file($file);
+
+        foreach (['client_id', 'client_secret'] as $key) {
+            if (empty($config[$key])) {
+                $output->writeln("<error>The configuration has no '$key'. Create an OAuth client of type \"Desktop app\" in a Google Cloud project and copy its credentials there.</error>");
+
+                return Command::FAILURE;
+            }
+        }
+
+        $client = Gmail::client($config + ['refresh_token' => null]);
+        $client->setRedirectUri('urn:ietf:wg:oauth:2.0:oob');
+
+        $output->writeln('Open this link, allow access, then paste the code back here:');
+        $output->writeln('');
+        $output->writeln('  <info>'.$client->createAuthUrl().'</info>');
+        $output->writeln('');
+
+        $helper = $this->getHelper('question');
+        $code = trim((string) $helper->ask($input, $output, new Question('Code: ')));
+
+        if ($code === '') {
+            $output->writeln('<error>No code given, nothing was changed.</error>');
+
+            return Command::FAILURE;
+        }
+
+        $token = $client->fetchAccessTokenWithAuthCode($code);
+
+        if (isset($token['error'])) {
+            $output->writeln('<error>Google refused the code: '.($token['error_description'] ?? $token['error']).'</error>');
+
+            return Command::FAILURE;
+        }
+
+        if (empty($token['refresh_token'])) {
+            $output->writeln('<error>Google returned no refresh token. Revoke the access at myaccount.google.com and try again, so the consent screen is shown afresh.</error>');
+
+            return Command::FAILURE;
+        }
+
+        // Appended rather than rewritten: the file is the operator's, and
+        // nothing else in it should move.
+        file_put_contents($file, "\nrefresh_token = \"".$token['refresh_token']."\"\n", FILE_APPEND);
+
+        $output->writeln('<info>Refresh token written to '.$file.'</info>');
+        $output->writeln('It does not expire; keep the file readable by you alone (chmod 600).');
+
+        return Command::SUCCESS;
+    }
+}
+
 class ConfigCommand extends Command
 {
 
@@ -321,6 +408,7 @@ class ConfigCommand extends Command
 $application = new MailbxzipApp();
 $application->add(new MailboxCommand());
 $application->add(new FoldersCommand());
+$application->add(new GmailAuthCommand());
 $application->add(new ConfigCommand());
 $application->run();
 

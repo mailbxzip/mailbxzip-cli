@@ -33,6 +33,7 @@ compressée en `~/.config/mailbxzip/archives/<nom-de-la-config>.zip`.
 | [`archive-complete-pdf.ini`](archive-complete-pdf.ini) | Archive toute la boîte en PDF, pièces jointes embarquées. | Non |
 | [`archive-exercice-mbox.ini`](archive-exercice-mbox.ini) | Archive une année civile au format mbox réimportable. | Non |
 | [`archive-expediteur.ini`](archive-expediteur.ini) | Archive tout ce qu'a envoyé un expéditeur, **toutes années confondues**. | Non par défaut |
+| [`gmail.ini`](gmail.ini) | Archive un compte **Gmail par l'API Google**, sans IMAP ni mot de passe. | Non par défaut |
 
 ### `essai-hors-ligne.ini`
 
@@ -149,6 +150,43 @@ Les deux filtres sont indépendants et se **restreignent mutuellement** :
 | `from` seul | Cet expéditeur, **toutes années confondues** |
 | `before` seul | Tout le monde, au-delà de l'ancienneté indiquée |
 | les deux | Cet expéditeur, et seulement au-delà de cette ancienneté |
+
+### `gmail.ini`
+
+Gmail par l'**API Google** : ni IMAP, ni mot de passe d'application.
+
+**Mise en route, une fois par compte.** Créez un projet sur
+`console.cloud.google.com`, activez l'API Gmail, créez un identifiant OAuth de
+type « Application de bureau », reportez `client_id` et `client_secret` dans la
+configuration, puis :
+
+```bash
+php cli.php gmail-auth gmail
+```
+
+La commande affiche un lien, vous autorisez dans le navigateur, vous collez le
+code : elle écrit le `refresh_token` dans le fichier. Il n'expire pas.
+
+**Les libellés ne sont pas des dossiers.** Un message Gmail en porte plusieurs
+à la fois. Archiver chaque libellé reviendrait à archiver le même message
+autant de fois qu'il a de libellés — d'où le comportement par défaut :
+
+| Configuration | Ce qui est archivé |
+|---|---|
+| *(défaut)* | `[Gmail]/All Mail` : **tous les messages, une fois chacun**, à plat |
+| `folders = "INBOX, Clients"` | Ces libellés, un message apparaissant sous chacun des siens |
+
+**La suppression est plus nette qu'en IMAP.** Gmail distingue lui-même les deux
+gestes, sans marquage ni expurgation : `trash = 1` déplace vers la corbeille
+(récupérable 30 jours), `delete = 1` supprime définitivement. Ni quota ni place
+libre en jeu.
+
+**Une nuance sur les filtres.** `since` et `before` portent, ici comme
+ailleurs, sur la date d'**envoi**. Or la recherche Gmail travaille sur la date
+de **réception**, et lit une date nue comme minuit au fuseau Pacifique. La
+requête envoyée est donc volontairement élargie d'un jour de chaque côté, en
+secondes, puis resserrée exactement sur l'en-tête `Date` — ce qui coûte cinq
+unités de quota par message candidat, et seulement quand un filtre est posé.
 
 ---
 

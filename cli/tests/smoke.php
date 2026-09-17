@@ -1197,6 +1197,61 @@ if (is_resource($guessProcess)) {
     proc_close($guessProcess);
 }
 
+// ------------------------------------------------------------------ Gmail ---
+echo "\nGmail — what can be checked without an account\n";
+
+// Building a query needs neither network nor token.
+$gmail = function (array $config) {
+    $class = new ReflectionClass('Mailbxzip\\Cli\\In\\Gmail');
+    $connector = $class->newInstanceWithoutConstructor();
+    $property = $class->getParentClass()->getProperty('config');
+    $property->setAccessible(true);
+    $property->setValue($connector, $config);
+
+    return $connector;
+};
+
+check('Gmail honours the input contract', is_subclass_of('Mailbxzip\\Cli\\In\\Gmail', 'Mailbxzip\\Cli\\Contract\\InputHandlerInterface'));
+check('it can remove what it archived', is_subclass_of('Mailbxzip\\Cli\\In\\Gmail', 'Mailbxzip\\Cli\\Contract\\DeletableInputInterface'));
+check('it can describe its labels', is_subclass_of('Mailbxzip\\Cli\\In\\Gmail', 'Mailbxzip\\Cli\\Contract\\DescribesFoldersInterface'));
+
+check('no filter, no query', $gmail([])->query() === '');
+check('one sender', $gmail(['from' => 'a@x.fr'])->query() === 'from:a@x.fr');
+check('several senders use Gmail alternation', $gmail(['from' => 'a@x.fr, b@y.fr'])->query() === '{from:a@x.fr from:b@y.fr}');
+check('a display name is quoted', $gmail(['from' => 'Alice Martin'])->query() === 'from:"Alice Martin"');
+
+// Dates go over as seconds: a bare date would be read as midnight Pacific
+// time, and nowhere is it said whether the bounds are inclusive.
+$window = $gmail(['since' => '2024-01-01', 'before' => '2025-01-01'])->query();
+check('dates travel as timestamps, not as dates', (bool) preg_match('/^after:\d+ before:\d+$/', $window));
+
+preg_match('/after:(\d+) before:(\d+)/', $window, $bounds);
+check('the lower bound is widened by a day', gmdate('Y-m-d', (int) $bounds[1]) === '2023-12-31');
+check('the upper bound is widened by a day', gmdate('Y-m-d', (int) $bounds[2]) === '2025-01-02');
+
+// Gmail's own labels answer as bare identifiers; the archive shows them the
+// way IMAP does, so a Gmail archive reads like any other.
+$naming = new ReflectionMethod('Mailbxzip\\Cli\\In\\Gmail', 'labelName');
+$naming->setAccessible(true);
+$label = function (string $id, string $name) use ($naming) {
+    return $naming->invoke(null, new \Google\Service\Gmail\Label(['id' => $id, 'name' => $name]));
+};
+
+check('the inbox keeps its name', $label('INBOX', 'INBOX') === 'INBOX');
+check('sent mail is named as IMAP shows it', $label('SENT', 'SENT') === '[Gmail]/Sent Mail');
+check('the trash is named as IMAP shows it', $label('TRASH', 'TRASH') === '[Gmail]/Trash');
+check('a label of your own keeps its name', $label('Label_7', 'Clients/Acme') === 'Clients/Acme');
+
+// Without credentials the connector must say which one is missing, rather
+// than fail somewhere inside the library.
+fails('a missing refresh token is named', function () {
+    new \Mailbxzip\Cli\In\Gmail(['client_id' => 'x', 'client_secret' => 'y']);
+}, "needs a 'refresh_token' entry");
+
+fails('the way to obtain it is given', function () {
+    new \Mailbxzip\Cli\In\Gmail(['client_id' => 'x', 'client_secret' => 'y']);
+}, 'gmail-auth');
+
 // ------------------------------------------------------------------ done ----
 foreach ($cleanup as $dir) {
     rmrf($dir);
