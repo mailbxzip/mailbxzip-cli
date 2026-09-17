@@ -8,6 +8,7 @@ use Mailbxzip\Cli\Contract\DeletableInputInterface;
 use Mailbxzip\Cli\Contract\DescribesFoldersInterface;
 use Mailbxzip\Cli\Eml;
 use Mailbxzip\Cli\Mailbox;
+use Mailbxzip\Cli\TrashUnavailableException;
 use RuntimeException;
 use Throwable;
 
@@ -92,7 +93,7 @@ class Gmail extends AbstractInput implements DeletableInputInterface, DescribesF
         $client->setApplicationName('mailbxzip');
         $client->setClientId((string) ($config['client_id'] ?? ''));
         $client->setClientSecret((string) ($config['client_secret'] ?? ''));
-        $client->setScopes(self::scopes());
+        $client->setScopes(self::scopes($config));
         $client->setAccessType('offline');
         $client->setPrompt('consent');
 
@@ -111,10 +112,15 @@ class Gmail extends AbstractInput implements DeletableInputInterface, DescribesF
     /**
      * @return array<int,string>
      */
-    public static function scopes(): array {
-        // readonly cannot delete, so ask for modify only when the
-        // configuration says messages are to be removed.
-        return [GmailService::GMAIL_MODIFY];
+    public static function scopes(array $config = []): array {
+        $delete = isset($config['delete']) && (string) $config['delete'] === '1';
+        $trash = trim((string) ($config['trash'] ?? ''));
+        $removes = $delete || ($trash !== '' && $trash !== '0');
+
+        // Read-only unless the configuration actually asks for messages to be
+        // removed: there is no reason to hold write access over someone's
+        // whole mailbox in order to copy it.
+        return [$removes ? GmailService::GMAIL_MODIFY : GmailService::GMAIL_READONLY];
     }
 
     /**
@@ -210,6 +216,15 @@ class Gmail extends AbstractInput implements DeletableInputInterface, DescribesF
 
                 $removed[] = $id;
             } catch (Throwable $e) {
+                // A token granted for reading cannot delete. Say so once and
+                // stop, rather than repeat the same refusal per message.
+                if (stripos($e->getMessage(), 'insufficient') !== false || stripos($e->getMessage(), 'scope') !== false) {
+                    throw new TrashUnavailableException(
+                        'the stored token only grants read access, so nothing can be removed. Add delete or trash to the '
+                        .'configuration, then run "php cli.php gmail-auth <config>" again to be asked for write access.'
+                    );
+                }
+
                 // A message already gone is not a failure: an earlier run may
                 // have taken it.
                 $this->log("message $id could not be removed: ".$e->getMessage(), 'WARNING');

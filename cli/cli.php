@@ -208,6 +208,9 @@ class FoldersCommand extends Command
 
 class GmailAuthCommand extends Command
 {
+    /** How long to wait for the browser to come back, in seconds. */
+    private const WAIT = 300;
+
     public function __construct()
     {
         parent::__construct('gmail-auth');
@@ -220,11 +223,15 @@ class GmailAuthCommand extends Command
             ->setHelp(
                 "The Gmail API takes no password. Create an OAuth client of type\n"
                 ."\"Desktop app\" in a Google Cloud project, put its client_id and\n"
-                ."client_secret in the configuration, then run this command: it prints\n"
-                ."a link to authorise, takes the code back, and writes the refresh\n"
-                ."token into the configuration file. Done once per mailbox."
+                ."client_secret in the configuration, then run this command.\n\n"
+                ."It listens on a loopback port and Google sends the authorisation\n"
+                ."back to it, so nothing has to be copied by hand. Over SSH, where the\n"
+                ."browser cannot reach that port, use --paste instead and hand back the\n"
+                ."address the browser was sent to."
             )
-            ->addArgument('email', InputArgument::REQUIRED, 'config filename');
+            ->addArgument('email', InputArgument::REQUIRED, 'config filename')
+            ->addOption('paste', null, InputOption::VALUE_NONE, 'do not listen; paste back the address the browser landed on')
+            ->addOption('port', null, InputOption::VALUE_REQUIRED, 'listen on this port instead of a free one, to forward it over SSH');
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -243,30 +250,56 @@ class GmailAuthCommand extends Command
 
         foreach (['client_id', 'client_secret'] as $key) {
             if (empty($config[$key])) {
-                $output->writeln("<error>The configuration has no '$key'. Create an OAuth client of type \"Desktop app\" in a Google Cloud project and copy its credentials there.</error>");
+                $output->writeln("<error>The configuration has no '$key'. Create an OAuth client of type \"Desktop app\" under Google Auth Platform > Clients, and copy its credentials there.</error>");
 
                 return Command::FAILURE;
             }
         }
 
+        // Listen first: the port is part of the redirect Google is told about,
+        // so it has to be known before the link is built.
+        $server = null;
+
+        if (!$input->getOption('paste')) {
+            $server = $this->listen($input->getOption('port'), $output);
+
+            if (is_null($server)) {
+                return Command::FAILURE;
+            }
+        }
+
+        $port = is_null($server) ? null : (int) substr(
+            stream_socket_get_name($server, false),
+            strrpos(stream_socket_get_name($server, false), ':') + 1
+        );
+
         $client = Gmail::client($config + ['refresh_token' => null]);
-        $client->setRedirectUri('urn:ietf:wg:oauth:2.0:oob');
+        $client->setRedirectUri(is_null($port) ? 'http://127.0.0.1:1' : 'http://127.0.0.1:'.$port);
 
-        $output->writeln('Open this link, allow access, then paste the code back here:');
+        // Proof key for code exchange: recommended by Google for installed
+        // apps, and free to add.
+        $verifier = rtrim(strtr(base64_encode(random_bytes(64)), '+/', '-_'), '=');
+        $challenge = rtrim(strtr(base64_encode(hash('sha256', $verifier, true)), '+/', '-_'), '=');
+
+        $url = $client->createAuthUrl(null, [
+            'code_challenge' => $challenge,
+            'code_challenge_method' => 'S256',
+        ]);
+
+        $output->writeln('Open this link and allow access:');
         $output->writeln('');
-        $output->writeln('  <info>'.$client->createAuthUrl().'</info>');
+        $output->writeln('  <info>'.$url.'</info>');
         $output->writeln('');
 
-        $helper = $this->getHelper('question');
-        $code = trim((string) $helper->ask($input, $output, new Question('Code: ')));
+        $code = is_null($server)
+            ? $this->pasted($input, $output)
+            : $this->awaited($server, $output);
 
-        if ($code === '') {
-            $output->writeln('<error>No code given, nothing was changed.</error>');
-
+        if (is_null($code)) {
             return Command::FAILURE;
         }
 
-        $token = $client->fetchAccessTokenWithAuthCode($code);
+        $token = $client->fetchAccessTokenWithAuthCode($code, $verifier);
 
         if (isset($token['error'])) {
             $output->writeln('<error>Google refused the code: '.($token['error_description'] ?? $token['error']).'</error>');
@@ -285,9 +318,116 @@ class GmailAuthCommand extends Command
         file_put_contents($file, "\nrefresh_token = \"".$token['refresh_token']."\"\n", FILE_APPEND);
 
         $output->writeln('<info>Refresh token written to '.$file.'</info>');
-        $output->writeln('It does not expire; keep the file readable by you alone (chmod 600).');
+        $output->writeln('It does not expire, provided the app is published rather than left in testing.');
+        $output->writeln('Keep the file readable by you alone: <comment>chmod 600 '.$file.'</comment>');
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Open the loopback socket Google will send the authorisation back to.
+     *
+     * @return resource|null
+     */
+    private function listen($port, OutputInterface $output)
+    {
+        $port = is_null($port) ? 0 : (int) $port;
+        $server = @stream_socket_server('tcp://127.0.0.1:'.$port, $errno, $errstr);
+
+        if (!$server) {
+            $output->writeln("<error>Cannot listen on 127.0.0.1:$port ($errstr). Use --port with a free one, or --paste.</error>");
+
+            return null;
+        }
+
+        return $server;
+    }
+
+    /**
+     * Wait for the browser to come back with the authorisation.
+     *
+     * @param resource $server
+     */
+    private function awaited($server, OutputInterface $output): ?string
+    {
+        $output->writeln('Waiting for the browser... (Ctrl-C to give up)');
+
+        $connection = @stream_socket_accept($server, self::WAIT);
+
+        if (!$connection) {
+            fclose($server);
+            $output->writeln('<error>Nothing came back within '.self::WAIT.' seconds. Over SSH the browser cannot reach this machine: try --paste.</error>');
+
+            return null;
+        }
+
+        $request = (string) fread($connection, 8192);
+        $code = null;
+        $error = null;
+
+        if (preg_match('/^GET\s+(\S+)/', $request, $matches)) {
+            $query = [];
+            parse_str((string) parse_url($matches[1], PHP_URL_QUERY), $query);
+            $code = $query['code'] ?? null;
+            $error = $query['error'] ?? null;
+        }
+
+        $message = is_null($code)
+            ? 'Authorisation failed'.(is_null($error) ? '' : ': '.htmlspecialchars((string) $error))
+            : 'Authorisation received. You can close this tab and go back to the terminal.';
+
+        $body = '<!doctype html><meta charset="utf-8"><title>mailbxzip</title>'
+            .'<body style="font-family:system-ui;padding:3rem"><p>'.$message.'</p></body>';
+
+        fwrite($connection, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+            ."Content-Length: ".strlen($body)."\r\nConnection: close\r\n\r\n".$body);
+        fclose($connection);
+        fclose($server);
+
+        if (is_null($code)) {
+            $output->writeln('<error>'.strip_tags($message).'</error>');
+
+            return null;
+        }
+
+        return (string) $code;
+    }
+
+    /**
+     * Take the authorisation from the address the browser landed on.
+     *
+     * The way through when the browser runs elsewhere: the page will not
+     * load, but the address bar holds the code all the same.
+     */
+    private function pasted(InputInterface $input, OutputInterface $output): ?string
+    {
+        $output->writeln('The page will not load -- nothing is listening there. Copy the address it tried');
+        $output->writeln('to reach, from the address bar, and paste it below.');
+        $output->writeln('');
+
+        $answer = trim((string) $this->getHelper('question')->ask($input, $output, new Question('Address or code: ')));
+
+        if ($answer === '') {
+            $output->writeln('<error>Nothing given, the configuration was left alone.</error>');
+
+            return null;
+        }
+
+        // A whole address, or just the code lifted out of it.
+        if (stripos($answer, 'http') === 0) {
+            $query = [];
+            parse_str((string) parse_url($answer, PHP_URL_QUERY), $query);
+
+            if (empty($query['code'])) {
+                $output->writeln('<error>That address carries no code'.(empty($query['error']) ? '' : ': '.$query['error']).'.</error>');
+
+                return null;
+            }
+
+            return (string) $query['code'];
+        }
+
+        return $answer;
     }
 }
 

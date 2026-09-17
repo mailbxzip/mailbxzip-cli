@@ -155,17 +155,78 @@ Les deux filtres sont indépendants et se **restreignent mutuellement** :
 
 Gmail par l'**API Google** : ni IMAP, ni mot de passe d'application.
 
-**Mise en route, une fois par compte.** Créez un projet sur
-`console.cloud.google.com`, activez l'API Gmail, créez un identifiant OAuth de
-type « Application de bureau », reportez `client_id` et `client_secret` dans la
-configuration, puis :
+**Oui, un projet Google Cloud est nécessaire.** L'API Gmail n'accepte que
+OAuth2, et les identifiants OAuth ne s'obtiennent que là. C'est gratuit, et
+c'est à faire une fois par compte à archiver.
+
+> Les libellés ci-dessous sont ceux de l'interface actuelle. Google a
+> réorganisé la configuration OAuth sous **Google Auth Platform** ; le terme
+> « écran de consentement OAuth » subsiste dans sa documentation, mais les
+> menus portent désormais les noms indiqués ici.
+
+**1. Créer le projet et activer l'API**
+
+Sur `console.cloud.google.com`, créez un projet, puis
+**APIs & Services › Library › Gmail API › Enable**. Sans cette activation, tous
+les appels seront refusés.
+
+**2. Déclarer l'application** — menu **Google Auth Platform › Branding**
+
+Renseignez le nom de l'application et une adresse d'assistance.
+
+**3. Choisir l'audience et publier** — **Google Auth Platform › Audience**
+
+Choisissez **External** (ou **Internal** si vous êtes sur Google Workspace et
+n'archivez que des comptes de votre organisation), ajoutez votre adresse comme
+utilisateur test, **puis cliquez sur `Publish app`**.
+
+> ⚠️ **Publiez, ne restez pas en « Testing ».** Google l'écrit noir sur blanc :
+> *« Authorizations by a test user will expire seven days from the time of
+> consent »*, et cela vaut explicitement pour les jetons de rafraîchissement.
+> Tout fonctionnerait une semaine, puis s'arrêterait sans raison apparente —
+> le genre de panne qu'on met des heures à diagnostiquer. Une fois publiée,
+> le jeton n'expire plus, sauf révocation ou six mois sans usage.
+
+**4. Créer les identifiants** — **Google Auth Platform › Clients › Create Client**
+
+Type d'application : **Desktop app**. Vous obtenez un `client_id` et un
+`client_secret` ; reportez-les dans la configuration.
+
+**5. Autoriser** — une fois, depuis le terminal
 
 ```bash
 php cli.php gmail-auth gmail
 ```
 
-La commande affiche un lien, vous autorisez dans le navigateur, vous collez le
-code : elle écrit le `refresh_token` dans le fichier. Il n'expire pas.
+La commande ouvre une écoute sur une adresse de boucle locale, affiche un lien,
+et Google lui renvoie l'autorisation directement : **rien à recopier**. Le
+`refresh_token` est écrit dans le fichier de configuration.
+
+> **Sur un serveur, en SSH**, le navigateur tourne sur votre poste et ne peut
+> pas joindre la boucle locale du serveur. Deux issues :
+>
+> ```bash
+> php cli.php gmail-auth gmail --paste
+> ```
+>
+> La page d'arrivée ne se chargera pas — c'est attendu — mais la barre
+> d'adresse contient le code : collez l'adresse entière, la commande en
+> extrait ce qu'il faut.
+>
+> Ou, si vous préférez le flux automatique, fixez le port et redirigez-le :
+> `ssh -L 8765:127.0.0.1:8765 …` puis `gmail-auth gmail --port=8765`.
+
+L'échange emploie **PKCE** et la redirection par boucle locale, que Google
+impose depuis qu'il a bloqué l'ancien flux « hors bande »
+(`urn:ietf:wg:oauth:2.0:oob`) le 31 janvier 2023.
+
+Un avertissement **« application non validée »** s'affiche pendant
+l'autorisation : c'est attendu pour un usage personnel, développez
+« Paramètres avancés » et poursuivez.
+
+**L'autorisation demandée est la plus étroite possible** : lecture seule tant
+que la configuration ne comporte ni `delete` ni `trash`. En ajouter une ensuite
+oblige à relancer `gmail-auth`, pour que Google accorde l'écriture.
 
 **Les libellés ne sont pas des dossiers.** Un message Gmail en porte plusieurs
 à la fois. Archiver chaque libellé reviendrait à archiver le même message

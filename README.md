@@ -165,7 +165,7 @@ interchangeables par configuration.
 | `Imap` | ✅ IMAP en PHP pur, aucune extension requise. **Défaut recommandé.** |
 | `Test` | ✅ Jeu de messages fictifs, pour essayer hors ligne. |
 | `ImapLegacy` | ⚠️ Ancienne implémentation via `ext-imap`, **dépréciée**. Refuse de démarrer si l'extension manque. |
-| `Gmail` | ✅ API Google, sans IMAP ni mot de passe. `php cli.php gmail-auth <config>` pour l'autorisation. |
+| `Gmail` | ✅ API Google, sans IMAP ni mot de passe. Demande un projet Cloud — [procédure](examples/README.md#gmailini) — puis `php cli.php gmail-auth <config>`. |
 | `Mbox`, `Pst` | ❌ Non implémentés. |
 
 ### Sortie (`out`)
@@ -358,6 +358,7 @@ consulter si un message manque à l'appel.
 php cli.php mailbox --start <config>    # lance ou reprend un export
 php cli.php folders <config>            # liste les dossiers, repère la corbeille
 php cli.php gmail-auth <config>         # autorisation Gmail, une fois par compte
+                                        #   --paste : en SSH, sans navigateur local
 php cli.php list                        # liste les commandes
 php cli.php help config                 # format du fichier de configuration
 ```
