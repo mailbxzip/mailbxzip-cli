@@ -803,6 +803,36 @@ check('one mbox for the whole export', count(glob($archive.'/Tout/email.mbox')) 
 // quoted, so the count is exact.
 check('and it holds every message', preg_match_all('/^From /m', file_get_contents($archive.'/Tout/email.mbox')) === 9);
 
+// ---------------------------------------------------------------- no zip ---
+echo "\nzip = 0 — the folder is the archive\n";
+
+$zipped = function (array $extra) {
+    $dir = workingDir('zip-'.substr(md5(serialize($extra)), 0, 6));
+    (new Mailbox(writeConfig($dir, 'Test', 'Html', $extra), $dir))->start();
+
+    $result = [
+        'zip' => is_file($dir.'/archives/test@mailbxzip.com.zip'),
+        'folder' => is_file($dir.'/archives/test@mailbxzip.com/index.html'),
+        'log' => file_get_contents($dir.'/archives/test@mailbxzip.com/export.log'),
+    ];
+
+    rmrf($dir);
+
+    return $result;
+};
+
+$default = $zipped([]);
+check('a zip is written by default', $default['zip'] && $default['folder']);
+
+$none = $zipped(['zip' => 0]);
+check('zip = 0 writes no zip', !$none['zip']);
+check('the HTML archive is still there', $none['folder']);
+check('the run says where the archive is', str_contains($none['log'], 'no zip written (zip = 0)'));
+
+// parse_ini_file turns an unquoted off into an empty string.
+check('zip = off is understood', !$zipped(['zip' => 'off'])['zip']);
+check('zip = 1 keeps the default', $zipped(['zip' => 1])['zip']);
+
 // ---------------------------------------------------------------- Out/Html ---
 echo "\nOut/Html — browsable archive\n";
 

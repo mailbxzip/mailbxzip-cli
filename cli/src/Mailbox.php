@@ -29,6 +29,7 @@ class Mailbox {
     public const CONFIG_VAR = [
         'wSource' => '(1|0) store eml source in separate "source" folder',
         'delete' => '(1|0) DESTRUCTIVE: erase the archived messages from the source, once the zip exists. Not needed when trash is set',
+        'zip' => '(1|0) 1 by default; 0 keeps the archive as a plain folder and writes no zip',
     ];
 
     /**
@@ -178,7 +179,11 @@ class Mailbox {
         // Export the emailArchivePath folder to a ZIP archive
         $sourceDir = $this->config['emailArchivePath'];
         $destFile = $this->config['archives_dir'] . '/' . basename($this->configFile) . '.zip';
-        $this->createZipArchive($sourceDir, $destFile);
+        if ($this->zipRequested()) {
+            $this->createZipArchive($sourceDir, $destFile);
+        } else {
+            $this->log("no zip written (zip = 0): the archive is the folder $sourceDir");
+        }
 
         // Only once the archive exists on disk may the source be emptied.
         $this->purgeSource($destFile);
@@ -310,9 +315,21 @@ class Mailbox {
             return;
         }
 
-        if (!is_file($zipFile) || filesize($zipFile) === 0) {
-            $this->log('deletion skipped: the zip archive was not produced', 'ERROR');
-            return;
+        if ($this->zipRequested()) {
+            if (!is_file($zipFile) || filesize($zipFile) === 0) {
+                $this->log('deletion skipped: the zip archive was not produced', 'ERROR');
+                return;
+            }
+        } else {
+            // Without a zip the folder is the archive: it is what has to be
+            // there before anything is taken off the source. Only messages
+            // recorded as written are purged, so it holds each of them.
+            if (!is_dir($this->config['emailArchivePath'])) {
+                $this->log('deletion skipped: the archive folder is missing', 'ERROR');
+                return;
+            }
+
+            $this->log('no zip requested: the archive folder is the only copy of what is about to be removed', 'WARNING');
         }
 
         $this->assertDeletionAllowed();
@@ -379,6 +396,20 @@ class Mailbox {
                 'WARNING'
             );
         }
+    }
+
+    /**
+     * Whether a zip is to be written, which is the default.
+     *
+     * parse_ini_file turns an unquoted no, false or off into an empty string,
+     * so an entry that is present but empty means no.
+     */
+    private function zipRequested() {
+        if (!array_key_exists('zip', $this->config)) {
+            return true;
+        }
+
+        return !in_array(strtolower(trim((string) $this->config['zip'])), ['', '0', 'no', 'false', 'off'], true);
     }
 
     /**

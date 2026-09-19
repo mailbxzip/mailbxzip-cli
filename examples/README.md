@@ -17,7 +17,8 @@ cd cli && php cli.php mailbox --start mon-archive
 > `~/.config/mailbxzip/config/mon-archive`.
 
 L'archive est écrite dans `~/.config/mailbxzip/archives/<address>/`, puis
-compressée en `~/.config/mailbxzip/archives/<nom-de-la-config>.zip`.
+compressée en `~/.config/mailbxzip/archives/<nom-de-la-config>.zip`. Ajoutez
+`zip = 0` pour garder le seul dossier.
 
 ---
 
@@ -269,7 +270,8 @@ aucune confirmation.
 
 - **La suppression est la toute dernière étape**, après l'écriture de
   l'archive ZIP. Si le ZIP n'a pas pu être produit, rien n'est supprimé et
-  l'incident est journalisé.
+  l'incident est journalisé. Avec `zip = 0`, c'est la présence du dossier de
+  sortie qui est exigée — et il devient la seule copie des messages retirés.
 - **Seuls les messages effectivement archivés** sont supprimés, d'après le
   journal `saved_emails.json`. Un message hors fenêtre de dates, ou dont
   l'écriture a échoué, reste sur le serveur.
@@ -442,6 +444,7 @@ Plus `username` et `password` dans les deux cas.
 | `from` | N'archiver que les messages dont l'en-tête `From` contient ceci. Plusieurs valeurs séparées par des virgules, l'une suffit. |
 | `folders` | N'archiver que ces dossiers ; nommer un dossier prend ses sous-dossiers. Plusieurs séparés par des virgules. Un nom inconnu est signalé au journal. |
 | `into` | Tout écrire dans ce seul dossier, au lieu de reproduire l'arborescence de la source. |
+| `zip` | `0` n'écrit pas d'archive ZIP : le dossier de sortie est l'archive. `1` par défaut. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `delete` | `1` supprime de la source les messages archivés. **Destructif.** |
 | `trash` | `1` déplace les messages archivés vers la corbeille au lieu de les effacer, ou nommez le dossier (`"INBOX/Corbeille"`). Se suffit à lui-même. |

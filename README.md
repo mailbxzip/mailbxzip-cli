@@ -141,6 +141,7 @@ Plus `username` et `password` dans les deux cas.
 | `delete` | `1` **efface** de la source les messages archivés. **Destructif.** |
 | `trash` | `1` **déplace** les messages archivés vers la corbeille, ou nommez le dossier. Se suffit à lui-même. |
 | `trash_mode` | `auto` (défaut) ou `append`. `append` efface puis redépose chaque message : lent, mais seul mode qui passe sur une boîte à son quota. |
+| `zip` | `0` n'écrit pas d'archive ZIP : le dossier de sortie **est** l'archive. `1` par défaut. |
 | `wSource` | `1` conserve le `.eml` d'origine à côté du format choisi. |
 | `debugHtml` | `1` conserve le HTML intermédiaire à côté de chaque PDF. |
 | `archives_dir` / `tmp_dir` | Déplacent les répertoires de travail. |
@@ -292,7 +293,8 @@ Quatre conditions doivent être réunies pour qu'un message disparaisse :
 2. la source sait supprimer ;
 3. le format de sortie se porte garant de son archive — un essai à blanc, par
    exemple, ne l'autorise pas ;
-4. **l'archive ZIP existe** — sinon la purge est abandonnée et journalisée.
+4. **l'archive existe** — le ZIP, ou le dossier de sortie si `zip = 0` —
+   sinon la purge est abandonnée et journalisée.
 
 Sur une **boîte pleine**, le déplacement échoue : il demande au serveur de
 détenir le message deux fois. `trash_mode = "append"` inverse l'ordre — lire,
@@ -315,6 +317,23 @@ Relancez la même commande. Les messages déjà écrits sont recensés dans
 Élargir la fenêtre de dates et relancer n'importe que le complément.
 Rétrécir la fenêtre **ne supprime rien** de ce qui est déjà archivé : une
 archive ne fait que s'enrichir.
+
+---
+
+## Sans archive ZIP
+
+Par défaut, le dossier de sortie est ensuite compressé en `<config>.zip`. Si
+seul le dossier vous intéresse — typiquement une archive HTML à consulter au
+navigateur :
+
+```ini
+out = Html
+zip = 0
+```
+
+Le dossier est alors **l'archive elle-même**. Associé à `delete` ou `trash`, il
+devient la seule copie des messages retirés de la boîte : le journal le
+rappelle, et mieux vaut le sauvegarder ailleurs avant de purger.
 
 ---
 
